@@ -1,137 +1,106 @@
+"""
+Seed-скрипт: создаёт demo-пользователя и наполняет его дерево из test-family.ged.
+Идемпотентен — повторный запуск не дублирует данные.
+
+Запуск:
+    python seed.py
+"""
+import hashlib
+import sys
+from pathlib import Path
+
+from sqlalchemy import select
+
 from database import SessionLocal, engine
-from models import Base, Gender, ParentChild, Person
-
-# Пересоздаем таблицы
-Base.metadata.create_all(bind=engine)
+from gedcom_import import import_gedcom
+from models import Base, Individual, Tree, User
 
 
-def seed_data():
-    db = SessionLocal()
+DEMO_EMAIL = "demo@example.com"
+DEMO_PASSWORD = "demo123"
+DEMO_DISPLAY_NAME = "Demo User"
+DEMO_TREE_NAME = "Демо-дерево"
 
-    # Очистка старых данных
-    db.query(ParentChild).delete()
-    db.query(Person).delete()
-    db.commit()
+GED_PATH = Path(__file__).parent / "test-family.ged"
 
-    # 1. Поколение 1 (дедушка и бабушка)
-    p1 = Person(
-        first_name="Иван",
-        given_name="Иоанн",
-        last_name="Иванов",
-        patronymic="Сидорович",
-        aliases="Ваня-Кузнец",
-        gender=Gender.MALE,
-        is_alive=False,
-        birth_date="12.05.1945",
-        birth_place="дер. Ивановка, Орловская область",
-        death_date="20.01.2018",
-        death_place="г. Москва",
-        death_cause="Естественные причины",
-        cemetery_name="Троекуровское кладбище",
-        cemetery_plot="Участок 4B",
-        occupations="Инженер-конструктор (1968–2010)",
-        education="МГТУ им. Н.Э. Баумана",
-        social_status="Рабочий / Интеллигенция",
-        military_is_served=True,
-        military_regiment="Связист",
-        military_rank="Сержант",
-        military_awards="Орден Почета",
-        religion="Православие",
-        residences="г. Москва, ул. Арбат, д. 12 (1970–2018)",
-        biography="Увлекался радиоэлектроникой, посвятил жизнь работе на заводе."
-    )
 
-    p2 = Person(
-        first_name="Анна",
-        last_name="Иванова",
-        patronymic="Петровна",
-        maiden_name="Смирнова",
-        gender=Gender.FEMALE,
-        is_alive=False,
-        birth_date="около 1948",
-        birth_place="г. Тула",
-        death_date="15.03.2021",
-        death_place="г. Москва",
-        cemetery_name="Троекуровское кладбище",
-        occupations="Учитель математики (1970–2005)",
-        education="МПГУ",
-        biography="Преподавала в средней школе более 35 лет."
-    )
+def _hash_password(password: str) -> str:
+    """Та же заглушка, что и в main.py (этап 6 заменит на bcrypt)."""
+    return "DEV:" + hashlib.sha256(password.encode()).hexdigest()
 
-    # 2. Поколение 2 (родители)
-    p3 = Person(
-        first_name="Алексей",
-        last_name="Иванов",
-        patronymic="Иванович",
-        gender=Gender.MALE,
-        is_alive=True,
-        birth_date="15.03.1975",
-        birth_place="г. Москва",
-        occupations="Архитектор (2000–н.в.)",
-        education="МАРХИ",
-        military_is_served=False,
-        residences="г. Москва, Ленинский проспект",
-        biography="Проектирует жилые комплексы и общественные пространства."
-    )
 
-    p4 = Person(
-        first_name="Мария",
-        last_name="Иванова",
-        patronymic="Сергеевна",
-        maiden_name="Петрова",
-        gender=Gender.FEMALE,
-        is_alive=True,
-        birth_date="05.11.1978",
-        birth_place="г. Санкт-Петербург",
-        occupations="Врач-кардиолог",
-        education="Первый МГМУ им. И.М. Сеченова",
-        biography="Заведующая отделением кардиохирургии."
-    )
+def main() -> int:
+    Base.metadata.create_all(bind=engine)
 
-    # 3. Поколение 3 (дети)
-    p5 = Person(
-        first_name="Дмитрий",
-        last_name="Иванов",
-        patronymic="Алексеевич",
-        gender=Gender.MALE,
-        is_alive=True,
-        birth_date="10.01.2002",
-        birth_place="г. Москва",
-        occupations="Программист",
-        education="НИУ ВШЭ",
-        biography="Занимается веб-разработкой и исследованием графовых баз данных."
-    )
+    if not GED_PATH.exists():
+        print(f"[seed] ERROR: файл не найден: {GED_PATH}", file=sys.stderr)
+        return 1
 
-    p6 = Person(
-        first_name="Елена",
-        last_name="Иванова",
-        patronymic="Алексеевна",
-        gender=Gender.FEMALE,
-        is_alive=True,
-        birth_date="25.07.2006",
-        birth_place="г. Москва",
-        education="Школа №1543",
-        biography="Увлекается живописью и графическим дизайном."
-    )
+    with SessionLocal() as db:
+        # --- 1. Пользователь ---
+        user = db.scalar(select(User).where(User.email == DEMO_EMAIL))
+        if user:
+            print(f"[seed] Пользователь уже существует: {DEMO_EMAIL} (id={user.id})")
+        else:
+            user = User(
+                email=DEMO_EMAIL,
+                password_hash=_hash_password(DEMO_PASSWORD),
+                display_name=DEMO_DISPLAY_NAME,
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            print(f"[seed] Создан пользователь: {DEMO_EMAIL} (id={user.id})")
 
-    db.add_all([p1, p2, p3, p4, p5, p6])
-    db.commit()
+        # --- 2. Дерево ---
+        tree = db.scalar(
+            select(Tree).where(Tree.owner_id == user.id).order_by(Tree.id)
+        )
+        if tree:
+            print(f"[seed] Дерево уже существует: '{tree.name}' (id={tree.id})")
+        else:
+            tree = Tree(owner_id=user.id, name=DEMO_TREE_NAME)
+            db.add(tree)
+            db.commit()
+            db.refresh(tree)
+            print(f"[seed] Создано дерево: '{tree.name}' (id={tree.id})")
 
-    # Создание связей родитель -> ребенок
-    relations = [
-        ParentChild(parent_id=p1.id, child_id=p3.id),  # Иван -> Алексей
-        ParentChild(parent_id=p2.id, child_id=p3.id),  # Анна -> Алексей
-        ParentChild(parent_id=p3.id, child_id=p5.id),  # Алексей -> Дмитрий
-        ParentChild(parent_id=p3.id, child_id=p6.id),  # Алексей -> Елена
-        ParentChild(parent_id=p4.id, child_id=p5.id),  # Мария -> Дмитрий
-        ParentChild(parent_id=p4.id, child_id=p6.id),  # Мария -> Елена
-    ]
+        # --- 3. Проверка: есть ли уже живые персоны? ---
+        existing = db.scalar(
+            select(Individual)
+            .where(
+                Individual.tree_id == tree.id,
+                Individual.deleted_at.is_(None),
+            )
+            .limit(1)
+        )
+        if existing:
+            print(f"[seed] Дерево уже содержит данные, импорт пропущен")
+            return 0
 
-    db.add_all(relations)
-    db.commit()
-    db.close()
-    print("Тестовое дерево с расширенными атрибутами успешно заполнено!")
+        # --- 4. Импорт GEDCOM ---
+        print(f"[seed] Импорт GEDCOM: {GED_PATH.name}")
+        try:
+            counts = import_gedcom(str(GED_PATH), tree.id, db)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            print(f"[seed] ERROR при импорте: {e}", file=sys.stderr)
+            raise
+
+        print(
+            f"[seed] Импорт завершён: "
+            f"{counts['individuals']} персон, "
+            f"{counts['families']} семей, "
+            f"{counts['child_links']} связей родитель-ребёнок"
+        )
+        print(
+            f"[seed] Войти как demo: "
+            f"email={DEMO_EMAIL}, password={DEMO_PASSWORD}"
+        )
+
+    return 0
 
 
 if __name__ == "__main__":
-    seed_data()
+    sys.exit(main())

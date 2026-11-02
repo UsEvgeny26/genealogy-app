@@ -95,16 +95,37 @@ function getSize(node) {
   };
 }
 
-export function positionFamilyNodes(layoutedNodes, families, direction) {
+export function positionFamilyNodes(layoutedNodes, families) {
   if (!families || families.length === 0) return;
 
   const nodeById = new Map(layoutedNodes.map((n) => [n.id, n]));
 
   for (const f of families) {
     const fNode = nodeById.get(f.id);
-    const a = nodeById.get(String(f.parentIds[0]));
-    const b = nodeById.get(String(f.parentIds[1]));
-    if (!fNode || !a || !b) continue;
+    if (!fNode) continue;
+
+    const validParentIds = (f.parentIds || []).filter(
+      (id) => id != null && nodeById.has(String(id))
+    );
+
+    if (validParentIds.length === 0) {
+      // Крайний случай: нет живых родителей.
+      // Позиционируем над первым живым ребёнком (если передан в f.childIds).
+      const childIds = (f.childIds || []).filter((id) => nodeById.has(String(id)));
+      if (childIds.length > 0) {
+        const firstChild = nodeById.get(String(childIds[0]));
+        const cSize = getSize(firstChild);
+        fNode.position = {
+          x: firstChild.position.x + cSize.w / 2 - FAMILY_SIZE / 2,
+          y: firstChild.position.y - 60,
+        };
+      }
+      // иначе — оставляем в (0,0), но такого не должно случиться
+      continue;
+    }
+
+    const a = nodeById.get(String(validParentIds[0]));
+    const b = validParentIds[1] ? nodeById.get(String(validParentIds[1])) : a;
 
     const aSize = getSize(a);
     const bSize = getSize(b);
@@ -119,7 +140,7 @@ export function positionFamilyNodes(layoutedNodes, families, direction) {
   }
 }
 
-export function repositionFamilyNodesLive(nodes, families, direction) {
+export function repositionFamilyNodesLive(nodes, families) {
   if (!families || families.length === 0) return nodes;
 
   const nodeById = new Map(nodes.map((n) => [n.id, n]));
@@ -133,7 +154,7 @@ export function repositionFamilyNodesLive(nodes, families, direction) {
     if (!family) return node;
 
     const a = nodeById.get(String(family.parentIds[0]));
-    const b = nodeById.get(String(family.parentIds[1]));
+    const b = family.parentIds[1] ? nodeById.get(String(family.parentIds[1])) : a;
     if (!a || !b) return node;
 
     const aSize = getSize(a);

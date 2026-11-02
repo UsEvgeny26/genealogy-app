@@ -1,214 +1,129 @@
 import { MarkerType } from '@xyflow/react';
 import { RELATION_CONFIG, RELATION_TYPES } from './relation-config';
 
-function configForParentKind(kind) {
-  return kind === 'adoptive'
-    ? RELATION_CONFIG[RELATION_TYPES.ADOPTIVE_PARENT]
-    : RELATION_CONFIG[RELATION_TYPES.BIOLOGICAL_PARENT];
-}
-
-function kindForParentKind(kind) {
-  return kind === 'adoptive'
-    ? RELATION_TYPES.ADOPTIVE_PARENT
-    : RELATION_TYPES.BIOLOGICAL_PARENT;
-}
+// relationship_type из БД → RELATION_TYPES
+const CHILD_KIND_MAP = {
+  biological: RELATION_TYPES.BIOLOGICAL_PARENT,
+  adoptive: RELATION_TYPES.ADOPTIVE_PARENT,
+  foster: RELATION_TYPES.FOSTER_PARENT,
+  step: RELATION_TYPES.STEP_PARENT,
+};
 
 /**
- * Возвращает:
- *   rawNodes         — все узлы (персоны + family nodes)
- *   families         — список семейств (для positionFamilyNodes)
- *   layoutEdges      — родитель-ребёнок в исходном виде (только для dagre)
- *   parentEdges      — родитель-ребёнок для рендера (без скрытых в семьях)
- *   familyChildEdges — рёбра от family node к детям
- *   godparentEdges   — крёстные
+ * Строит "сырые" узлы и рёбра для dagre-layout.
+ * Рендер-рёбра (с цветами/маркерами) — см. buildRenderEdges, после layout.
+ *
+ * apiData — ответ GET /api/graph:
+ *   { tree_id, tree_name, owner_id, can_edit, persons, families,
+ *     marriage_edges, child_edges, association_edges }
  */
 export function buildRawGraph(apiData, {
-  isLoggedIn,
+  canEdit,
   layoutDirection = 'TB',
   onEdit,
   onDelete,
   onAddConnection,
-  onAddChild,  
-  onRequestDeleteEdge,
 }) {
-  const relations = apiData.relations || [];
-  const marriages = apiData.marriages || [];
-  const parentChildEdges = apiData.edges || [];
+  const persons = apiData.persons || [];
+  const families = apiData.families || [];
+  const childEdges = apiData.child_edges || [];
 
-  /* --- 1. Считаем семьи --- */
-  const parentsByChild = new Map();
-  for (const e of parentChildEdges) {
-    if (!parentsByChild.has(e.target_id)) parentsByChild.set(e.target_id, []);
-    parentsByChild.get(e.target_id).push({ id: e.source_id, kind: e.kind || 'biological' });
-  }
-
-  const families = [];
-  const hiddenParentChild = new Set(); // "parentId-childId"
-
-  for (const m of marriages) {
-    const commonChildren = [];
-    for (const [childId, parents] of parentsByChild) {
-      const pA = parents.find((p) => p.id === m.spouse1_id);
-      const pB = parents.find((p) => p.id === m.spouse2_id);
-      if (pA && pB && pA.kind === pB.kind) {
-        commonChildren.push({ childId, kind: pA.kind });
-      }
-    }
-
-    if (commonChildren.length > 0) {
-      const familyId = `family-${m.id}`;
-      families.push({
-        id: familyId,
-        marriageId: m.id,
-        marriageStatus: m.status || 'married',
-        parentIds: [m.spouse1_id, m.spouse2_id],
-        children: commonChildren,
-      });
-      for (const c of commonChildren) {
-        hiddenParentChild.add(`${m.spouse1_id}-${c.childId}`);
-        hiddenParentChild.add(`${m.spouse2_id}-${c.childId}`);
-      }
-    }
-  }
-
-  /* --- 2. Узлы --- */
-  const personNodes = apiData.nodes.map((node) => ({
-    id: String(node.id),
+  const personNodes = persons.map((p) => ({
+    id: String(p.id),
     type: 'personNode',
     data: {
-      ...node,
-      isLoggedIn,
+      ...p,
+      canEdit,
       layoutDirection,
-      onEdit: () => onEdit(node),
-      onDelete: () => onDelete(node.id),
-      onAddConnection: () => onAddConnection(node),
+      onEdit: () => onEdit(p),
+      onDelete: () => onDelete(p.id),
+      onAddConnection: () => onAddConnection(p),
     },
     position: { x: 0, y: 0 },
   }));
 
-  const familyNodes = families.map((f) => ({
-    id: f.id,
-    type: 'familyNode',
-    data: {
-      layoutDirection,
-      kind: f.children[0]?.kind || 'biological',
-      marriageStatus: f.marriageStatus,
-    },
-    position: { x: 0, y: 0 },
-    draggable: false,
-    selectable: false,
+  const familyNodes = families.map((f) => {
+    const spouse1 = f.spouse1_id != null ? f.spouse1_id : null;
+    const spouse2 = f.spouse2_id != null ? f.spouse2_id : null;
+    return {
+      id: `family-${f.id}`,
+      type: 'familyNode',
+      data: {
+        layoutDirection,
+        status: f.status,
+        dbId: f.id,
+        spouse1_id: spouse1,
+        spouse2_id: spouse2,
+      },
+      position: { x: 0, y: 0 },
+      draggable: false,
+      selectable: false,
+    };
+  });
+
+  // Для dagre: family-children → person→child (разворачиваем в каждого родителя)
+  const layoutEdges = [];
+  for (const f of families) {
+    const parents = [f.spouse1_id, f.spouse2_id].filter(Boolean);
+    const familyChildren = childEdges
+      .filter((ce) => ce.family_id === f.id)
+      .map((ce) => ce.child_id);
+    for (const parentId of parents) {
+      for (const childId of familyChildren) {
+        layoutEdges.push({
+          source: String(parentId),
+          target: String(childId),
+        });
+      }
+    }
+  }
+
+  const familiesMeta = families.map((f) => ({
+    id: `family-${f.id}`,
+    parentIds: [f.spouse1_id, f.spouse2_id].filter((id) => id != null),
+    childIds: childEdges.filter((ce) => ce.family_id === f.id).map((ce) => ce.child_id),
+    status: f.status,
   }));
-
-  /* --- 3. Рёбра --- */
-
-  // 3a. Для dagre — все родитель-ребёнок БЕЗ фильтрации (реальная структура)
-  const layoutEdges = parentChildEdges.map((edge) => ({
-    id: `pc-${edge.source_id}-${edge.target_id}`,
-    source: String(edge.source_id),
-    target: String(edge.target_id),
-    sourceHandle: 'flow-source',
-    targetHandle: 'flow-target',
-    data: { kind: edge.kind || 'biological' },
-  }));
-
-  // 3b. Для рендера — без тех, что ушли в семью
-  const parentEdges = parentChildEdges
-    .filter((e) => !hiddenParentChild.has(`${e.source_id}-${e.target_id}`))
-    .map((edge) => {
-      const kind = kindForParentKind(edge.kind);
-      const cfg = configForParentKind(edge.kind);
-      return {
-        id: `pc-${edge.source_id}-${edge.target_id}`,
-        source: String(edge.source_id),
-        target: String(edge.target_id),
-        sourceHandle: 'flow-source',
-        targetHandle: 'flow-target',
-        type: 'relationEdge',
-        animated: true,
-        markerEnd: cfg.arrow ? { type: MarkerType.ArrowClosed, color: cfg.color } : undefined,
-        data: { kind, canDelete: isLoggedIn, onRequestDelete: onRequestDeleteEdge },
-      };
-    });
-
-  // 3c. Рёбра от семьи к детям
-  const familyChildEdges = families.flatMap((f) =>
-    f.children.map((c) => {
-      const kind = kindForParentKind(c.kind);
-      const cfg = configForParentKind(c.kind);
-      return {
-        id: `fc-${f.id}-${c.childId}`,
-        source: f.id,
-        target: String(c.childId),
-        sourceHandle: 'flow-source',
-        targetHandle: 'flow-target',
-        type: 'relationEdge',
-        animated: true,
-        markerEnd: cfg.arrow ? { type: MarkerType.ArrowClosed, color: cfg.color } : undefined,
-        data: {
-          kind,
-          familyId: f.id,
-          childId: c.childId,
-          parentIds: f.parentIds,   // ← для удаления через ребро
-          canDelete: isLoggedIn,     // ← было false
-          onRequestDelete: onRequestDeleteEdge,
-        },
-      };
-    })
-  );
-
-  // 3d. Крёстные
-  const godparentEdges = relations
-    .filter((r) => r.type === 'godparent')
-    .map((r) => {
-      const cfg = RELATION_CONFIG[RELATION_TYPES.GODPARENT];
-      return {
-        id: `g-${r.id}`,
-        source: String(r.from_id),
-        target: String(r.to_id),
-        sourceHandle: 'flow-source',
-        targetHandle: 'flow-target',
-        type: 'relationEdge',
-        animated: true,
-        markerEnd: cfg.arrow ? { type: MarkerType.ArrowClosed, color: cfg.color } : undefined,
-        data: {
-          kind: RELATION_TYPES.GODPARENT,
-          relationId: r.id,
-          canDelete: isLoggedIn,
-          onRequestDelete: onRequestDeleteEdge,
-        },
-      };
-    });
-
   return {
     rawNodes: [...personNodes, ...familyNodes],
-    families,
+    families: familiesMeta,
     layoutEdges,
-    parentEdges,
-    familyChildEdges,
-    godparentEdges,
   };
+
+  const orphanedEdges = apiData.orphaned_parent_edges || [];
+  for (const oe of orphanedEdges) {
+    layoutEdges.push({
+      source: String(oe.parent_id),
+      target: String(oe.child_id),
+    });
+  }
 }
 
-export function buildMarriageEdges(marriages, layoutedNodes, {
-  isLoggedIn,
+export function buildRenderEdges(apiData, layoutedNodes, {
+  canEdit,
   layoutDirection = 'TB',
   onRequestDeleteEdge,
 }) {
   const posById = new Map(layoutedNodes.map((n) => [n.id, n.position]));
   const isVertical = layoutDirection === 'TB' || layoutDirection === 'BT';
+  const familiesById = new Map((apiData.families || []).map((f) => [f.id, f]));
 
-  return marriages
-    .map((m) => {
-      const a = posById.get(String(m.spouse1_id));
-      const b = posById.get(String(m.spouse2_id));
+  // --- marriage edges ---
+  const marriageEdges = (apiData.marriage_edges || [])
+    .map((me) => {
+      const a = posById.get(String(me.source_id));
+      const b = posById.get(String(me.target_id));
       if (!a || !b) return null;
 
       const [sourceId, targetId] = isVertical
-        ? (a.x <= b.x ? [m.spouse1_id, m.spouse2_id] : [m.spouse2_id, m.spouse1_id])
-        : (a.y <= b.y ? [m.spouse1_id, m.spouse2_id] : [m.spouse2_id, m.spouse1_id]);
+        ? (a.x <= b.x ? [me.source_id, me.target_id] : [me.target_id, me.source_id])
+        : (a.y <= b.y ? [me.source_id, me.target_id] : [me.target_id, me.source_id]);
+
+      const fam = familiesById.get(me.family_id);
+      const isDivorced = fam?.status === 'divorced' || fam?.status === 'widowed';
 
       return {
-        id: `m-${m.id}`,
+        id: `m-${me.family_id}`,
         source: String(sourceId),
         target: String(targetId),
         sourceHandle: 'perp-source',
@@ -217,12 +132,93 @@ export function buildMarriageEdges(marriages, layoutedNodes, {
         animated: true,
         data: {
           kind: RELATION_TYPES.MARRIAGE,
-          marriageId: m.id,
-          divorced: m.status === 'divorced',
-          canDelete: isLoggedIn,
+          familyId: me.family_id,
+          divorced: isDivorced,
+          canDelete: canEdit,
           onRequestDelete: onRequestDeleteEdge,
         },
       };
     })
     .filter(Boolean);
+
+  // --- child edges (family → child) ---
+  const childEdges = (apiData.child_edges || []).map((ce) => {
+    const kind = CHILD_KIND_MAP[ce.relationship_type] || RELATION_TYPES.BIOLOGICAL_PARENT;
+    const cfg = RELATION_CONFIG[kind];
+    return {
+      id: `fc-${ce.family_id}-${ce.child_id}`,
+      source: `family-${ce.family_id}`,
+      target: String(ce.child_id),
+      sourceHandle: 'flow-source',
+      targetHandle: 'flow-target',
+      type: 'relationEdge',
+      animated: true,
+      markerEnd: cfg.arrow
+        ? { type: MarkerType.ArrowClosed, color: cfg.color }
+        : undefined,
+      data: {
+        kind,
+        familyId: `family-${ce.family_id}`,
+        familyDbId: ce.family_id,
+        childId: ce.child_id,
+        relationshipType: ce.relationship_type,
+        canDelete: canEdit,
+        onRequestDelete: onRequestDeleteEdge,
+      },
+    };
+  });
+
+  // --- association edges (крёстные) ---
+  const associationEdges = (apiData.association_edges || []).map((ae) => {
+    const cfg = RELATION_CONFIG[RELATION_TYPES.GODPARENT];
+    return {
+      id: `a-${ae.id}`,
+      source: String(ae.source_id),
+      target: String(ae.target_id),
+      sourceHandle: 'flow-source',
+      targetHandle: 'flow-target',
+      type: 'relationEdge',
+      animated: true,
+      markerEnd: cfg.arrow
+        ? { type: MarkerType.ArrowClosed, color: cfg.color }
+        : undefined,
+      data: {
+        kind: RELATION_TYPES.GODPARENT,
+        associationId: ae.id,
+        associationType: ae.type,
+        canDelete: canEdit,
+        onRequestDelete: onRequestDeleteEdge,
+      },
+    };
+  });
+
+  // --- orphaned parent edges (прямые, без family-node) ---
+  const orphanedEdges = (apiData.orphaned_parent_edges || []).map((oe, i) => {
+    const kind = CHILD_KIND_MAP[oe.relationship_type] || RELATION_TYPES.BIOLOGICAL_PARENT;
+    const cfg = RELATION_CONFIG[kind];
+    return {
+      id: `op-${oe.parent_id}-${oe.child_id}-${i}`,
+      source: String(oe.parent_id),
+      target: String(oe.child_id),
+      sourceHandle: 'flow-source',
+      targetHandle: 'flow-target',
+      type: 'relationEdge',
+      animated: true,
+      markerEnd: cfg.arrow
+        ? { type: MarkerType.ArrowClosed, color: cfg.color }
+        : undefined,
+      data: {
+        kind,
+        orphaned: true,  // ← помечаем: это прямая связь, не family-child
+        familyDbId: oe.family_id, 
+        parentId: oe.parent_id,
+        childId: oe.child_id,
+        relationshipType: oe.relationship_type,
+        canDelete: canEdit,
+        onRequestDelete: onRequestDeleteEdge,
+      },
+    };
+  });
+
+  return { marriageEdges, childEdges, orphanedEdges, associationEdges };
 }

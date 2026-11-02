@@ -1,414 +1,893 @@
+import hashlib
+from datetime import datetime
 from typing import List, Optional
+
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select, or_, and_, inspect, text
-from sqlalchemy.orm import Session
-from auth import get_current_user, require_user
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, joinedload
 
+from auth import get_current_user, require_user
 from database import engine, get_db
-from models import Base, ParentChild, Person, Marriage, Relation
+from models import (
+    Association, Base, Family, FamilyChild, FamilyStatus,
+    Individual, Tree, User,
+)
 from schemas import (
-    PersonCreate,
-    PersonDetail,
-    PersonExtendedDetail,
-    PersonUpdate,
-    TreeDataResponse,
-    TreeEdge,
-    TreeNode,
-    MarriageCreate,
-    MarriageShort,
-    MarriageUpdate,
-    RelationCreate,
-    RelationShort,
-    ParentChildCreate,
+    AssociationCreate, AssociationShort,
+    FamilyCreate, FamilyDetail, FamilyShort, FamilyUpdate,
+    FamilyChildCreate, FamilyChildShort,
+    IndividualCreate, IndividualDetail, IndividualShort, IndividualUpdate,
+    LoginRequest, TreeCreate, TreeListItem, TreeNode, TreeShort,
+    TreeStats, TreeUpdate, TreeGraphResponse, TreeFamilyNode,
+    TreeMarriageEdge, TreeChildEdge, TreeAssociationEdge,
+    UserCreate, UserPublic, TreeOrphanParentEdge,
 )
 
-# Создаем таблицы при старте (для SQLite)
+
+DEMO_EMAIL = "demo@example.com"
+
 Base.metadata.create_all(bind=engine)
 
-def _run_migrations():
-    """ALTER TABLE для SQLite: добавление колонки kind в parent_child."""
-    insp = inspect(engine)
-    if 'parent_child' not in insp.get_table_names():
-        return
-    cols = [c['name'] for c in insp.get_columns('parent_child')]
-    if 'kind' not in cols:
-        with engine.begin() as conn:
-            conn.execute(text(
-                "ALTER TABLE parent_child ADD COLUMN kind VARCHAR(20) NOT NULL DEFAULT 'biological'"
-            ))
-        print('[migration] parent_child.kind added')
+app = FastAPI(title="Genealogy Tree API", version="2.0")
 
-#_run_migrations()
-#Base.metadata.create_all(bind=engine)
-
-def _migrate_adoptive_relations():
-    """Переносит Relation(type='adoptive_parent') в ParentChild(kind='adoptive')."""
-    from models import ParentChild, Relation
-    from database import SessionLocal
-    with SessionLocal() as db:
-        rows = db.scalars(select(Relation).where(Relation.type == 'adoptive_parent')).all()
-        for r in rows:
-            existing = db.scalar(select(ParentChild).where(
-                ParentChild.parent_id == r.from_id,
-                ParentChild.child_id == r.to_id,
-            ))
-            if existing:
-                existing.kind = 'adoptive'
-            else:
-                db.add(ParentChild(parent_id=r.from_id, child_id=r.to_id, kind='adoptive'))
-            db.delete(r)
-        db.commit()
-        if rows:
-            print(f'[migration] {len(rows)} adoptive relations moved to parent_child')
-
-#_migrate_adoptive_relations()
-
-
-app = FastAPI(title="Genealogy Tree API")
-
-# Настройка CORS Middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=True,
-    allow_methods=["*"],  # Разрешить GET, POST, PUT, DELETE и т.д.
-    allow_headers=["*"],  # Разрешить любые заголовки
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
-@app.get("/api/auth/me")
-def get_me(user: Optional[dict] = Depends(get_current_user)):
-    if not user:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    return user
+
+# Утилиты
+
+def hash_password(password: str) -> str:
+    """Временный хеш. Заменить на bcrypt/argon2 на этапе 6."""
+    return "DEV:" + hashlib.sha256(password.encode()).hexdigest()
 
 
-# 1. Получение всего дерева (для рендеринга на React-холсте)
-@app.get("/api/tree", response_model=TreeDataResponse)
-def get_full_tree(db: Session = Depends(get_db)):
-    persons = db.scalars(select(Person)).all()
-    relations = db.scalars(select(ParentChild)).all()
-    marriages = db.scalars(select(Marriage)).all()
-    extra_relations = db.scalars(select(Relation)).all()
+def verify_password(password: str, hash_: str) -> bool:
+    return hash_password(password) == hash_
 
-    nodes = [
-        TreeNode(
-            id=p.id,
-            first_name=p.first_name,
-            last_name=p.last_name,
-            patronymic=p.patronymic,
-            gender=p.gender,
-            is_alive=p.is_alive,
-            photo_url=p.photo_url,
-        )
-        for p in persons
-    ]
 
-    edges = [
-        TreeEdge(source_id=r.parent_id, target_id=r.child_id, kind=r.kind or 'biological')
-        for r in relations
-    ]
+def get_tree_or_403(tree_id: int, user: User, db: Session) -> Tree:
+    tree = db.get(Tree, tree_id)
+    if not tree:
+        raise HTTPException(status_code=404, detail="Дерево не найдено")
+    if tree.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="Нет доступа к этому дереву")
+    return tree
 
-    return TreeDataResponse(
-        nodes=nodes,
-        edges=edges,
-        marriages=[MarriageShort.model_validate(m) for m in marriages],
-        relations=[RelationShort.model_validate(r) for r in extra_relations],
+
+def get_or_create_default_tree(user: User, db: Session) -> Tree:
+    tree = db.scalar(
+        select(Tree).where(Tree.owner_id == user.id).order_by(Tree.id)
+    )
+    if tree:
+        return tree
+    tree = Tree(owner_id=user.id, name="Моё дерево")
+    db.add(tree)
+    db.commit()
+    db.refresh(tree)
+    return tree
+
+
+def serialize_user(user: User) -> UserPublic:
+    return UserPublic(
+        id=user.id,
+        email=user.email,
+        display_name=user.display_name,
+        is_active=user.is_active,
+        created_at=user.created_at,
     )
 
+# Auth
 
-
-# 2. Создание новой карточки человека
-
-@app.post("/api/persons", response_model=PersonDetail, status_code=status.HTTP_201_CREATED)
-def create_person(person_in: PersonCreate, db: Session = Depends(get_db), user: dict = Depends(require_user),):
-    person = Person(**person_in.model_dump())
-    db.add(person)
-    db.commit()
-    db.refresh(person)
-    return person
-
-
-
-# 3. Краткая информация о человеке (базовый просмотр)
-@app.get("/api/persons/{person_id}", response_model=PersonDetail)
-def get_person(person_id: int, db: Session = Depends(get_db)):
-    person = db.get(Person, person_id)
-    if not person:
-        raise HTTPException(status_code=404, detail="Person not found")
-    return person
-
-
-# 4. Расширенная информация о человеке со всеми полями
-@app.get("/api/persons/{person_id}/extended", response_model=PersonExtendedDetail)
-def get_person_extended(person_id: int, db: Session = Depends(get_db)):
-    person = db.get(Person, person_id)
-    if not person:
-        raise HTTPException(status_code=404, detail="Person not found")
-    return person
-
-
-# 5. Редактирование личных и расширенных данных
-@app.put("/api/persons/{person_id}", response_model=PersonExtendedDetail)
-def update_person(person_id: int, person_in: PersonUpdate, db: Session = Depends(get_db), user: dict = Depends(require_user),):
-    person = db.get(Person, person_id)
-    if not person:
-        raise HTTPException(status_code=404, detail="Person not found")
-
-    update_data = person_in.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(person, field, value)
-
-    db.commit()
-    db.refresh(person)
-    return person
-
-
-# 6. Удаление человека
-@app.delete("/api/persons/{person_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_person(person_id: int, db: Session = Depends(get_db), user: dict = Depends(require_user),):
-    person = db.get(Person, person_id)
-    if not person:
-        raise HTTPException(status_code=404, detail="Person not found")
-
-    db.delete(person)
-    db.commit()
-
-
-
-# 7. Добавление связи «родитель-ребенок»
-@app.post("/api/persons/{child_id}/parents/{parent_id}", response_model=PersonDetail)
-def add_parent_relation(child_id: int, parent_id: int, db: Session = Depends(get_db), user: dict = Depends(require_user),):
-    if child_id == parent_id:
-        raise HTTPException(status_code=400, detail="Person cannot be their own parent")
-
-    child = db.get(Person, child_id)
-    parent = db.get(Person, parent_id)
-
-    if not child or not parent:
-        raise HTTPException(status_code=404, detail="Child or Parent not found")
-
-    existing = db.scalar(
-        select(ParentChild).where(
-            ParentChild.parent_id == parent_id,
-            ParentChild.child_id == child_id,
-        )
-    )
-    if not existing:
-        relation = ParentChild(parent_id=parent_id, child_id=child_id)
-        db.add(relation)
-        db.commit()
-        db.refresh(child)
-
-    return child
-
-
-# 9. Создание связи родитель-ребёнок
-@app.post("/api/parent-child", response_model=PersonDetail, status_code=status.HTTP_201_CREATED)
-def create_parent_child(
-    data: ParentChildCreate,
-    db: Session = Depends(get_db),
-    user: dict = Depends(require_user),
-):
-    if data.parent_id == data.child_id:
-        raise HTTPException(status_code=400, detail="Нельзя связать человека с самим собой")
-    if data.kind not in ('biological', 'adoptive'):
-        raise HTTPException(status_code=400, detail="Недопустимый тип родительства")
-
-    parent = db.get(Person, data.parent_id)
-    child = db.get(Person, data.child_id)
-    if not parent or not child:
-        raise HTTPException(status_code=404, detail="Родитель или ребёнок не найден")
-
-    # Проверка цикла: child не должен быть предком parent
-    def is_ancestor(a_id: int, b_id: int) -> bool:
-        """True, если a_id является предком b_id."""
-        visited = set()
-        stack = [b_id]
-        while stack:
-            cur = stack.pop()
-            if cur in visited:
-                continue
-            visited.add(cur)
-            rows = db.scalars(select(ParentChild).where(ParentChild.child_id == cur)).all()
-            for r in rows:
-                if r.parent_id == a_id:
-                    return True
-                stack.append(r.parent_id)
-        return False
-
-    if is_ancestor(data.child_id, data.parent_id):
-        raise HTTPException(status_code=400, detail="Это создаст цикл в дереве")
-
-    existing = db.get(ParentChild, (data.parent_id, data.child_id))
+@app.post("/api/auth/register", response_model=UserPublic, status_code=201)
+def register(data: UserCreate, db: Session = Depends(get_db)):
+    existing = db.scalar(select(User).where(User.email == data.email))
     if existing:
-        existing.kind = data.kind
-    else:
-        db.add(ParentChild(
-            parent_id=data.parent_id,
-            child_id=data.child_id,
-            kind=data.kind,
-        ))
+        raise HTTPException(status_code=400, detail="Этот email уже зарегистрирован")
+
+    user = User(
+        email=data.email,
+        password_hash=hash_password(data.password),
+        display_name=data.display_name or data.email.split("@")[0],
+    )
+    db.add(user)
     db.commit()
-    return child
+    db.refresh(user)
+
+    # Первое дерево для пользователя
+    get_or_create_default_tree(user, db)
+
+    return serialize_user(user)
 
 
-# 10. Удаление связи родитель-ребёнок
-@app.delete("/api/parent-child/{parent_id}/{child_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_parent_child(
-    parent_id: int,
-    child_id: int,
+@app.post("/api/auth/login")
+def login(data: LoginRequest, db: Session = Depends(get_db)):
+    user = db.scalar(select(User).where(User.email == data.email))
+    if not user or not user.password_hash or not verify_password(data.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Неверный email или пароль")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Пользователь деактивирован")
+
+    # Заглушка: токен = email. На этапе 6 вернём session-id.
+    return {
+        "token": user.email,
+        "user": serialize_user(user),
+    }
+
+
+@app.get("/api/auth/me", response_model=UserPublic)
+def get_me(user: User = Depends(require_user)):
+    return serialize_user(user)
+
+
+@app.post("/api/auth/logout", status_code=204)
+def logout(user: User = Depends(require_user), db: Session = Depends(get_db)):
+    # Заглушка: на этапе 6 удалим session.
+    # Сейчас просто возвращаем 204 — фронт удалит токен из localStorage.
+    return None
+
+
+# Trees
+def _tree_stats(tree_id: int, db: Session) -> TreeStats:
+    ind_count = db.scalar(
+        select(func.count(Individual.id))
+        .where(Individual.tree_id == tree_id, Individual.deleted_at.is_(None))
+    ) or 0
+    fam_count = db.scalar(
+        select(func.count(Family.id))
+        .where(Family.tree_id == tree_id, Family.deleted_at.is_(None))
+    ) or 0
+    return TreeStats(
+        individuals_count=ind_count,
+        families_count=fam_count,
+        generations=0,  # TODO: посчитать поколения при необходимости
+    )
+
+
+@app.get("/api/trees", response_model=List[TreeListItem])
+def list_trees(user: User = Depends(require_user), db: Session = Depends(get_db)):
+    trees = db.scalars(
+        select(Tree).where(Tree.owner_id == user.id).order_by(Tree.id)
+    ).all()
+
+    return [
+        TreeListItem(
+            id=t.id,
+            name=t.name,
+            description=t.description,
+            created_at=t.created_at,
+            updated_at=t.updated_at,
+            stats=_tree_stats(t.id, db),
+        )
+        for t in trees
+    ]
+
+
+@app.post("/api/trees", response_model=TreeShort, status_code=201)
+def create_tree(
+    data: TreeCreate,
+    user: User = Depends(require_user),
     db: Session = Depends(get_db),
-    user: dict = Depends(require_user),
 ):
-    rel = db.get(ParentChild, (parent_id, child_id))
-    if not rel:
-        raise HTTPException(status_code=404, detail="Связь не найдена")
-    db.delete(rel)
+    tree = Tree(owner_id=user.id, name=data.name, description=data.description)
+    db.add(tree)
+    db.commit()
+    db.refresh(tree)
+    return tree
+
+
+@app.get("/api/trees/{tree_id}", response_model=TreeShort)
+def get_tree(tree_id: int, user: User = Depends(require_user), db: Session = Depends(get_db)):
+    tree = get_tree_or_403(tree_id, user, db)
+    return tree
+
+
+@app.patch("/api/trees/{tree_id}", response_model=TreeShort)
+def update_tree(
+    tree_id: int,
+    data: TreeUpdate,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    tree = get_tree_or_403(tree_id, user, db)
+    for k, v in data.model_dump(exclude_unset=True).items():
+        setattr(tree, k, v)
+    db.commit()
+    db.refresh(tree)
+    return tree
+
+
+@app.delete("/api/trees/{tree_id}", status_code=204)
+def delete_tree(tree_id: int, user: User = Depends(require_user), db: Session = Depends(get_db)):
+    tree = get_tree_or_403(tree_id, user, db)
+    db.delete(tree)
     db.commit()
 
 
-# # 8. Удаление связи «родитель-ребенок»
-# @app.delete("/api/persons/{child_id}/parents/{parent_id}", status_code=status.HTTP_204_NO_CONTENT)
-# def remove_parent_relation(child_id: int, parent_id: int, db: Session = Depends(get_db),user: dict = Depends(require_user),):
-#     relation = db.scalar(
-#         select(ParentChild).where(
-#             ParentChild.parent_id == parent_id,
-#             ParentChild.child_id == child_id,
-#         )
-#     )
-#     if not relation:
-#         raise HTTPException(status_code=404, detail="Relationship not found")
-#
-#     db.delete(relation)
-#     db.commit()
-    
-    
+def _build_graph(tree: Tree, can_edit: bool, db: Session) -> TreeGraphResponse:
+    individuals = db.scalars(
+        select(Individual)
+        .where(Individual.tree_id == tree.id, Individual.deleted_at.is_(None))
+        .order_by(Individual.id)
+    ).all()
+    person_ids = {i.id for i in individuals}
 
-# 9. Создание брака
-@app.post("/api/marriages", response_model=MarriageShort, status_code=status.HTTP_201_CREATED)
-def create_marriage(
-    data: MarriageCreate,
+    families_raw = db.scalars(
+        select(Family)
+        .where(Family.tree_id == tree.id, Family.deleted_at.is_(None))
+        .order_by(Family.id)
+    ).all()
+
+    associations = db.scalars(
+        select(Association)
+        .where(Association.tree_id == tree.id)
+        .order_by(Association.id)
+    ).all()
+
+    family_ids_all = [f.id for f in families_raw]
+    child_links_all = (
+        db.scalars(
+            select(FamilyChild).where(FamilyChild.family_id.in_(family_ids_all))
+        ).all()
+        if family_ids_all
+        else []
+    )
+    child_links_all = [fc for fc in child_links_all if fc.child_id in person_ids]
+
+    # ⚠️ Семья существует, только если ОБА супруга живы
+    intact_families = [
+        f for f in families_raw
+        if f.spouse1_id in person_ids and f.spouse2_id in person_ids
+    ]
+
+    orphaned_links = []
+    for f in families_raw:
+        if f in intact_families:
+            continue
+        live_parents = [
+            pid for pid in (f.spouse1_id, f.spouse2_id)
+            if pid is not None and pid in person_ids
+        ]
+        if len(live_parents) == 0:
+            continue
+        links_in_family = [fc for fc in child_links_all if fc.family_id == f.id]
+        for fc in links_in_family:
+            for parent_id in live_parents:
+                orphaned_links.append((f.id, parent_id, fc.child_id, fc.relationship_type))
+
+    families = intact_families
+    family_ids = {f.id for f in families}
+    child_links = [fc for fc in child_links_all if fc.family_id in family_ids]
+
+    persons = [
+        TreeNode(
+            id=i.id,
+            first_name=i.first_name,
+            last_name=i.last_name,
+            patronymic=i.patronymic,
+            gender=i.gender,
+            is_alive=i.is_alive,
+            photo_url=i.photo_url,
+            birth_date=i.birth_date,
+        )
+        for i in individuals
+    ]
+
+    family_nodes = [
+        TreeFamilyNode(
+            id=f.id,
+            spouse1_id=f.spouse1_id,
+            spouse2_id=f.spouse2_id,
+            status=f.status,
+        )
+        for f in families
+    ]
+
+    marriage_edges = [
+        TreeMarriageEdge(
+            family_id=f.id,
+            source_id=f.spouse1_id,
+            target_id=f.spouse2_id,
+        )
+        for f in families
+    ]
+
+    child_edges = [
+        TreeChildEdge(
+            family_id=fc.family_id,
+            child_id=fc.child_id,
+            relationship_type=fc.relationship_type,
+        )
+        for fc in child_links
+    ]
+
+    # ⚠️ Прямые рёбра (без family-node) — для осиротевших семей
+    orphaned_parent_edges = [
+        TreeOrphanParentEdge(
+            family_id=fid,
+            parent_id=pid,
+            child_id=cid,
+            relationship_type=rel_type,
+        )
+        for fid, pid, cid, rel_type in orphaned_links
+    ]
+
+    association_edges = [
+        TreeAssociationEdge(
+            id=a.id,
+            type=a.type,
+            source_id=a.from_id,
+            target_id=a.to_id,
+        )
+        for a in associations
+        if a.from_id in person_ids and a.to_id in person_ids
+    ]
+
+    return TreeGraphResponse(
+        tree_id=tree.id,
+        tree_name=tree.name,
+        owner_id=tree.owner_id,
+        can_edit=can_edit,
+        persons=persons,
+        families=family_nodes,
+        marriage_edges=marriage_edges,
+        child_edges=child_edges,
+        orphaned_parent_edges=orphaned_parent_edges,
+        association_edges=association_edges,
+    )
+
+
+@app.get("/api/graph", response_model=TreeGraphResponse)
+def get_current_graph(
+    user: Optional[User] = Depends(get_current_user),
     db: Session = Depends(get_db),
-    user: dict = Depends(require_user),
 ):
-    if data.spouse1_id == data.spouse2_id:
-        raise HTTPException(status_code=400, detail="Нельзя создать брак с самим собой")
+    """
+    Универсальный эндпоинт для холста.
+    - Авторизован → его первое дерево, can_edit=true
+    - Гость → дерево demo-пользователя (email="demo@local"), can_edit=false
+    """
+    if user:
+        tree = get_or_create_default_tree(user, db)
+        return _build_graph(tree, can_edit=True, db=db)
 
-    s1 = db.get(Person, data.spouse1_id)
-    s2 = db.get(Person, data.spouse2_id)
-    if not s1 or not s2:
-        raise HTTPException(status_code=404, detail="Один из супругов не найден")
+    # Гость — смотрим дерево demo
+    demo = db.scalar(select(User).where(User.email == DEMO_EMAIL))
+    if not demo:
+        # Демо-дерева нет → пустой граф
+        return TreeGraphResponse(
+            tree_id=0, tree_name="", owner_id=0, can_edit=False,
+            persons=[], families=[],
+            marriage_edges=[], child_edges=[], association_edges=[],
+        )
 
-    existing = db.scalar(
-        select(Marriage).where(
-            or_(
-                and_(Marriage.spouse1_id == data.spouse1_id, Marriage.spouse2_id == data.spouse2_id),
-                and_(Marriage.spouse1_id == data.spouse2_id, Marriage.spouse2_id == data.spouse1_id),
+    demo_tree = db.scalar(
+        select(Tree).where(Tree.owner_id == demo.id).order_by(Tree.id)
+    )
+    if not demo_tree:
+        return TreeGraphResponse(
+            tree_id=0, tree_name="", owner_id=demo.id, can_edit=False,
+            persons=[], families=[],
+            marriage_edges=[], child_edges=[], association_edges=[],
+        )
+
+    return _build_graph(demo_tree, can_edit=False, db=db)
+
+
+@app.get("/api/trees/{tree_id}/graph", response_model=TreeGraphResponse)
+def get_tree_graph(
+    tree_id: int,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    tree = get_tree_or_403(tree_id, user, db)
+    return _build_graph(tree, can_edit=True, db=db)
+
+
+# Individual CRUD
+def get_individual_or_403(
+    individual_id: int,
+    user: User,
+    db: Session,
+) -> Individual:
+    ind = db.get(Individual, individual_id)
+    if not ind or ind.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Персона не найдена")
+    tree = db.get(Tree, ind.tree_id)
+    if not tree or tree.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    return ind
+
+
+def _family_short_with_children(
+    fam: Family,
+    children: List[Individual],
+    live_person_ids: set,
+) -> FamilyShort:
+    return FamilyShort(
+        id=fam.id,
+        spouse1_id=fam.spouse1_id if fam.spouse1_id in live_person_ids else None,
+        spouse2_id=fam.spouse2_id if fam.spouse2_id in live_person_ids else None,
+        status=fam.status,
+        marriage_date=fam.marriage_date,
+        divorce_date=fam.divorce_date,
+        children=[IndividualShort.model_validate(c) for c in children],
+    )
+
+
+def _individual_to_detail(ind: Individual, db: Session) -> IndividualDetail:
+    # Все живые персоны дерева — для проверки перед отдачей в ответ
+    live_person_ids = set(
+        db.scalars(
+            select(Individual.id).where(
+                Individual.tree_id == ind.tree_id,
+                Individual.deleted_at.is_(None),
+            )
+        ).all()
+    )
+
+    # --- parent_families: семьи, где ind — ребёнок ---
+    parent_links = db.scalars(
+        select(FamilyChild).where(FamilyChild.child_id == ind.id)
+    ).all()
+    parent_family_ids = [fc.family_id for fc in parent_links]
+
+    parent_families_raw = (
+        db.scalars(
+            select(Family).where(
+                Family.id.in_(parent_family_ids),
+                Family.deleted_at.is_(None),
+            )
+        ).all()
+        if parent_family_ids
+        else []
+    )
+
+    parent_families_filtered = [
+        f for f in parent_families_raw
+        if (f.spouse1_id in live_person_ids) or (f.spouse2_id in live_person_ids)
+    ]
+
+    # --- spouse_families: семьи, где ind — супруг ---
+    spouse_families_raw = db.scalars(
+        select(Family).where(
+            (Family.spouse1_id == ind.id) | (Family.spouse2_id == ind.id),
+            Family.deleted_at.is_(None),
+        )
+    ).all()
+
+    spouse_families_payload = []
+    for fam in spouse_families_raw:
+        links = db.scalars(
+            select(FamilyChild).where(FamilyChild.family_id == fam.id)
+        ).all()
+        child_ids = [l.child_id for l in links if l.child_id in live_person_ids]
+        children = (
+            db.scalars(select(Individual).where(Individual.id.in_(child_ids))).all()
+            if child_ids
+            else []
+        )
+        spouse_families_payload.append(
+            _family_short_with_children(fam, children, live_person_ids)
+        )
+
+    return IndividualDetail(
+        id=ind.id,
+        tree_id=ind.tree_id,
+        gedcom_xref=ind.gedcom_xref,
+        first_name=ind.first_name,
+        last_name=ind.last_name,
+        patronymic=ind.patronymic,
+        maiden_name=ind.maiden_name,
+        nicknames=ind.nicknames,
+        aliases=ind.aliases,
+        gender=ind.gender,
+        is_alive=ind.is_alive,
+        biography=ind.biography,
+        photo_url=ind.photo_url,
+        birth_date=ind.birth_date,
+        birth_place=ind.birth_place,
+        death_date=ind.death_date,
+        death_place=ind.death_place,
+        created_at=ind.created_at,
+        updated_at=ind.updated_at,
+        parent_families=[
+            _family_short_with_children(f, [], live_person_ids)
+            for f in parent_families_filtered
+        ],
+        spouse_families=spouse_families_payload,
+    )
+
+
+@app.post("/api/trees/{tree_id}/individuals", response_model=IndividualDetail, status_code=201)
+def create_individual(
+    tree_id: int,
+    data: IndividualCreate,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    tree = get_tree_or_403(tree_id, user, db)
+
+    ind = Individual(tree_id=tree.id, **data.model_dump())
+    db.add(ind)
+    db.commit()
+    db.refresh(ind)
+
+    # Если is_alive == False и death_date задан — обновим флаг
+    if ind.is_alive and ind.death_date:
+        ind.is_alive = False
+        db.commit()
+        db.refresh(ind)
+
+    return _individual_to_detail(ind, db)
+
+
+@app.get("/api/individuals/{individual_id}", response_model=IndividualDetail)
+def get_individual(
+    individual_id: int,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    ind = get_individual_or_403(individual_id, user, db)
+    return _individual_to_detail(ind, db)
+
+
+@app.patch("/api/individuals/{individual_id}", response_model=IndividualDetail)
+def update_individual(
+    individual_id: int,
+    data: IndividualUpdate,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    ind = get_individual_or_403(individual_id, user, db)
+
+    for k, v in data.model_dump(exclude_unset=True).items():
+        setattr(ind, k, v)
+
+    # Автообновление is_alive
+    if ind.death_date and ind.is_alive:
+        ind.is_alive = False
+
+    db.commit()
+    db.refresh(ind)
+    return _individual_to_detail(ind, db)
+
+
+@app.delete("/api/individuals/{individual_id}", status_code=204)
+def delete_individual(
+    individual_id: int,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Удаление человека с полной очисткой связей:
+    1. Удаляем FamilyChild, где он ребёнок
+    2. В семьях, где он супруг — обнуляем spouse1/spouse2
+    3. Удаляем ассоциации (крёстные и др.)
+    4. Soft-delete человека
+    5. Опустевшие семьи (нет супругов и детей) — soft-delete
+    """
+    ind = get_individual_or_403(individual_id, user, db)
+
+    # 1. Убрать его как ребёнка из всех семей
+    child_links = db.scalars(
+        select(FamilyChild).where(FamilyChild.child_id == ind.id)
+    ).all()
+    for link in child_links:
+        db.delete(link)
+
+    # 2. Семьи, где он супруг — обнулить spouse_id
+    spouse_families = db.scalars(
+        select(Family).where(
+            (Family.spouse1_id == ind.id) | (Family.spouse2_id == ind.id),
+            Family.deleted_at.is_(None),
+        )
+    ).all()
+    for fam in spouse_families:
+        if fam.spouse1_id == ind.id:
+            fam.spouse1_id = None
+        if fam.spouse2_id == ind.id:
+            fam.spouse2_id = None
+
+    # 3. Удалить ассоциации
+    associations = db.scalars(
+        select(Association).where(
+            (Association.from_id == ind.id) | (Association.to_id == ind.id)
+        )
+    ).all()
+    for a in associations:
+        db.delete(a)
+
+    # 4. Soft-delete персону
+    ind.deleted_at = datetime.utcnow()
+
+    db.commit()
+
+    # 5. Опустевшие семьи — soft-delete
+    for fam in spouse_families:
+        db.refresh(fam)
+        child_count = db.scalar(
+            select(func.count(FamilyChild.child_id))
+            .where(FamilyChild.family_id == fam.id)
+        ) or 0
+        if fam.spouse1_id is None and fam.spouse2_id is None and child_count == 0:
+            fam.deleted_at = datetime.utcnow()
+
+    db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Family CRUD
+# ---------------------------------------------------------------------------
+
+def get_family_or_403(family_id: int, user: User, db: Session) -> Family:
+    fam = db.get(Family, family_id)
+    if not fam or fam.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Семья не найдена")
+    tree = db.get(Tree, fam.tree_id)
+    if not tree or tree.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    return fam
+
+
+def _validate_individual_in_tree(individual_id: int, tree_id: int, db: Session):
+    ind = db.get(Individual, individual_id)
+    if not ind or ind.deleted_at is not None or ind.tree_id != tree_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Персона {individual_id} не найдена в этом дереве",
+        )
+
+
+def _family_to_detail(fam: Family, db: Session) -> FamilyDetail:
+    # Не показывать soft-deleted супругов
+    spouse1_raw = db.get(Individual, fam.spouse1_id) if fam.spouse1_id else None
+    spouse2_raw = db.get(Individual, fam.spouse2_id) if fam.spouse2_id else None
+    spouse1 = spouse1_raw if spouse1_raw and spouse1_raw.deleted_at is None else None
+    spouse2 = spouse2_raw if spouse2_raw and spouse2_raw.deleted_at is None else None
+
+    links = db.scalars(
+        select(FamilyChild).where(FamilyChild.family_id == fam.id)
+    ).all()
+    child_ids = [l.child_id for l in links]
+    children = (
+        db.scalars(
+            select(Individual).where(
+                Individual.id.in_(child_ids),
+                Individual.deleted_at.is_(None),
+            )
+        ).all()
+        if child_ids
+        else []
+    )
+
+    return FamilyDetail(
+        id=fam.id,
+        tree_id=fam.tree_id,
+        gedcom_xref=fam.gedcom_xref,
+        spouse1_id=fam.spouse1_id if spouse1 else None,
+        spouse2_id=fam.spouse2_id if spouse2 else None,
+        status=fam.status,
+        marriage_date=fam.marriage_date,
+        marriage_place=fam.marriage_place,
+        divorce_date=fam.divorce_date,
+        note=fam.note,
+        created_at=fam.created_at,
+        updated_at=fam.updated_at,
+        spouse1=IndividualShort.model_validate(spouse1) if spouse1 else None,
+        spouse2=IndividualShort.model_validate(spouse2) if spouse2 else None,
+        children=[IndividualShort.model_validate(c) for c in children],
+        children_links=[
+            FamilyChildShort(
+                family_id=l.family_id,
+                child_id=l.child_id,
+                relationship_type=l.relationship_type,
+            )
+            for l in links
+        ],
+    )
+
+
+@app.post("/api/trees/{tree_id}/families", response_model=FamilyDetail, status_code=201)
+def create_family(
+    tree_id: int,
+    data: FamilyCreate,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    tree = get_tree_or_403(tree_id, user, db)
+
+    if data.spouse1_id is not None and data.spouse2_id is not None:
+        if data.spouse1_id == data.spouse2_id:
+            raise HTTPException(status_code=400, detail="Супруги не могут быть одним человеком")
+        _validate_individual_in_tree(data.spouse1_id, tree.id, db)
+        _validate_individual_in_tree(data.spouse2_id, tree.id, db)
+
+        # Проверка дубля: активная семья между этими двумя уже есть?
+        existing = db.scalar(
+            select(Family).where(
+                Family.tree_id == tree.id,
+                Family.deleted_at.is_(None),
+                Family.status != FamilyStatus.DIVORCED,
+                (
+                    ((Family.spouse1_id == data.spouse1_id) & (Family.spouse2_id == data.spouse2_id))
+                    | ((Family.spouse1_id == data.spouse2_id) & (Family.spouse2_id == data.spouse1_id))
+                ),
             )
         )
-    )
+        if existing:
+            raise HTTPException(
+                status_code=400,
+                detail="Семья между этими людьми уже существует",
+            )
+
+    fam = Family(tree_id=tree.id, **data.model_dump())
+    db.add(fam)
+    db.commit()
+    db.refresh(fam)
+    return _family_to_detail(fam, db)
+
+
+@app.get("/api/families/{family_id}", response_model=FamilyDetail)
+def get_family(
+    family_id: int,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    fam = get_family_or_403(family_id, user, db)
+    return _family_to_detail(fam, db)
+
+
+@app.patch("/api/families/{family_id}", response_model=FamilyDetail)
+def update_family(
+    family_id: int,
+    data: FamilyUpdate,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    fam = get_family_or_403(family_id, user, db)
+
+    payload = data.model_dump(exclude_unset=True)
+
+    for spouse_key in ("spouse1_id", "spouse2_id"):
+        if spouse_key in payload and payload[spouse_key] is not None:
+            _validate_individual_in_tree(payload[spouse_key], fam.tree_id, db)
+
+    # Нельзя одного и того же в spouse1 и spouse2
+    s1 = payload.get("spouse1_id", fam.spouse1_id)
+    s2 = payload.get("spouse2_id", fam.spouse2_id)
+    if s1 is not None and s1 == s2:
+        raise HTTPException(status_code=400, detail="Супруги не могут быть одним человеком")
+
+    for k, v in payload.items():
+        setattr(fam, k, v)
+
+    db.commit()
+    db.refresh(fam)
+    return _family_to_detail(fam, db)
+
+
+@app.delete("/api/families/{family_id}", status_code=204)
+def delete_family(
+    family_id: int,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    """Soft delete: помечаем deleted_at. Дети и события остаются в БД."""
+    fam = get_family_or_403(family_id, user, db)
+    fam.deleted_at = datetime.utcnow()
+    db.commit()
+
+
+# FamilyChild — ребёнок в семье
+@app.post("/api/family-children", response_model=FamilyChildShort, status_code=201)
+def add_child_to_family(
+    data: FamilyChildCreate,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    fam = get_family_or_403(data.family_id, user, db)
+    _validate_individual_in_tree(data.child_id, fam.tree_id, db)
+
+    # Нельзя, чтобы ребёнок был одним из супругов
+    if data.child_id in (fam.spouse1_id, fam.spouse2_id):
+        raise HTTPException(
+            status_code=400,
+            detail="Ребёнок не может быть одним из супругов семьи",
+        )
+
+    # Дубль?
+    existing = db.get(FamilyChild, (data.family_id, data.child_id))
     if existing:
-        raise HTTPException(status_code=400, detail="Брак между этими людьми уже существует")
+        # Обновим тип связи (например, с biological на adoptive)
+        existing.relationship_type = data.relationship_type
+        db.commit()
+        return FamilyChildShort(
+            family_id=existing.family_id,
+            child_id=existing.child_id,
+            relationship_type=existing.relationship_type,
+        )
 
-    marriage = Marriage(**data.model_dump())
-    db.add(marriage)
+    link = FamilyChild(
+        family_id=data.family_id,
+        child_id=data.child_id,
+        relationship_type=data.relationship_type,
+    )
+    db.add(link)
     db.commit()
-    db.refresh(marriage)
-    return marriage
+    return FamilyChildShort(
+        family_id=link.family_id,
+        child_id=link.child_id,
+        relationship_type=link.relationship_type,
+    )
 
 
-
-# 10. Удаление брака
-@app.delete("/api/marriages/{marriage_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_marriage(
-    marriage_id: int,
+@app.delete("/api/family-children/{family_id}/{child_id}", status_code=204)
+def remove_child_from_family(
+    family_id: int,
+    child_id: int,
+    user: User = Depends(require_user),
     db: Session = Depends(get_db),
-    user: dict = Depends(require_user),
 ):
-    m = db.get(Marriage, marriage_id)
-    if not m:
-        raise HTTPException(status_code=404, detail="Marriage not found")
-    db.delete(m)
+    fam = get_family_or_403(family_id, user, db)
+    link = db.get(FamilyChild, (fam.id, child_id))
+    if not link:
+        raise HTTPException(status_code=404, detail="Связь не найдена")
+    db.delete(link)
     db.commit()
 
 
-
-# 11. Обновление брака (статус, даты, заметки) — для развода
-@app.put("/api/marriages/{marriage_id}", response_model=MarriageShort)
-def update_marriage(
-    marriage_id: int,
-    data: MarriageUpdate,
+# Association (крёстные, свидетели, опекуны)
+@app.post("/api/trees/{tree_id}/associations", response_model=AssociationShort, status_code=201)
+def create_association(
+    tree_id: int,
+    data: AssociationCreate,
+    user: User = Depends(require_user),
     db: Session = Depends(get_db),
-    user: dict = Depends(require_user),
 ):
-    m = db.get(Marriage, marriage_id)
-    if not m:
-        raise HTTPException(status_code=404, detail="Marriage not found")
+    tree = get_tree_or_403(tree_id, user, db)
 
-    update_data = data.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(m, field, value)
-
-    db.commit()
-    db.refresh(m)
-    return m
-
-
-
-# 12. Создание произвольной связи (приёмные родители, крёстные, ...)
-
-ALLOWED_RELATION_TYPES = {"godparent"}
-
-
-@app.post("/api/relations", response_model=RelationShort, status_code=status.HTTP_201_CREATED)
-def create_relation(
-    data: RelationCreate,
-    db: Session = Depends(get_db),
-    user: dict = Depends(require_user),
-):
     if data.from_id == data.to_id:
         raise HTTPException(status_code=400, detail="Нельзя связать человека с самим собой")
-    if data.type not in ALLOWED_RELATION_TYPES:
-        raise HTTPException(status_code=400, detail=f"Недопустимый тип связи: {data.type}")
 
-    p1 = db.get(Person, data.from_id)
-    p2 = db.get(Person, data.to_id)
-    if not p1 or not p2:
-        raise HTTPException(status_code=404, detail="Один из людей не найден")
+    _validate_individual_in_tree(data.from_id, tree.id, db)
+    _validate_individual_in_tree(data.to_id, tree.id, db)
 
     existing = db.scalar(
-        select(Relation).where(
-            Relation.type == data.type,
-            Relation.from_id == data.from_id,
-            Relation.to_id == data.to_id,
+        select(Association).where(
+            Association.tree_id == tree.id,
+            Association.type == data.type,
+            Association.from_id == data.from_id,
+            Association.to_id == data.to_id,
         )
     )
     if existing:
         raise HTTPException(status_code=400, detail="Такая связь уже существует")
 
-    relation = Relation(**data.model_dump())
-    db.add(relation)
+    assoc = Association(tree_id=tree.id, **data.model_dump())
+    db.add(assoc)
     db.commit()
-    db.refresh(relation)
-    return relation
+    db.refresh(assoc)
+    return assoc
 
 
-
-# 13. Удаление произвольной связи
-
-@app.delete("/api/relations/{relation_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_relation(
-    relation_id: int,
+@app.delete("/api/associations/{association_id}", status_code=204)
+def delete_association(
+    association_id: int,
+    user: User = Depends(require_user),
     db: Session = Depends(get_db),
-    user: dict = Depends(require_user),
 ):
-    r = db.get(Relation, relation_id)
-    if not r:
-        raise HTTPException(status_code=404, detail="Relation not found")
-    db.delete(r)
+    assoc = db.get(Association, association_id)
+    if not assoc:
+        raise HTTPException(status_code=404, detail="Связь не найдена")
+    tree = db.get(Tree, assoc.tree_id)
+    if not tree or tree.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    db.delete(assoc)
     db.commit()

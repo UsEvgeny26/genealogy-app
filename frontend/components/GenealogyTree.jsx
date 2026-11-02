@@ -2,71 +2,56 @@
 
 import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import {
-  ReactFlow, Controls, Background, useNodesState, useEdgesState, applyNodeChanges, ConnectionMode,
+  ReactFlow, Controls, Background,
+  useNodesState, useEdgesState,
+  applyNodeChanges, ConnectionMode,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { PersonNode } from './PersonNode';
+import { FamilyNode } from './FamilyNode';
 import { RelationEdge } from './RelationEdge';
 import { PersonModal } from './PersonModal';
 import { PersonViewModal } from './PersonViewModal';
 import { PersonExtendedViewModal } from './PersonExtendedViewModal';
 import { ConnectionModal } from './ConnectionModal';
 import { SideMenu } from './SideMenu';
-import { FamilyNode } from './FamilyNode';
-import { getLayoutedElements, positionFamilyNodes, repositionFamilyNodesLive } from '@/lib/layout';
-import { buildRawGraph, buildMarriageEdges } from '@/lib/tree-adapter';
-import { useRelationActions } from '@/hooks/useRelationActions';
+import {
+  getLayoutedElements,
+  positionFamilyNodes,
+  repositionFamilyNodesLive,
+} from '@/lib/layout';
+import { buildRawGraph, buildRenderEdges } from '@/lib/tree-adapter';
+import { useDialog } from './DialogProvider';
 import { UserPlus, AlertCircle, Lock, Menu } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
-import { useDialog } from './DialogProvider';
 
 const THEME_KEY = 'tree-theme';
 const DIRECTION_KEY = 'tree-direction';
 
-export const GenealogyTree = ({ isLoggedIn = false }) => {
+export const GenealogyTree = () => {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
 
+  const [graphMeta, setGraphMeta] = useState({ tree_id: null, can_edit: false });
+
   const [layoutDirection, setLayoutDirection] = useState('TB');
   const [menuOpen, setMenuOpen] = useState(false);
   const [theme, setTheme] = useState('light');
 
-  // Восстановление настроек из localStorage
+  const dialog = useDialog();
+  const dialogRef = useRef(dialog);
+  useEffect(() => { dialogRef.current = dialog; }, [dialog]);
+
+  // Настройки
   useEffect(() => {
     if (typeof window === 'undefined') return;
-
-    const savedDirection = localStorage.getItem(DIRECTION_KEY);
-    if (savedDirection && ['TB', 'BT', 'LR', 'RL'].includes(savedDirection)) {
-      setLayoutDirection(savedDirection);
-    }
-
+    const savedDir = localStorage.getItem(DIRECTION_KEY);
+    if (savedDir && ['TB', 'BT', 'LR', 'RL'].includes(savedDir)) setLayoutDirection(savedDir);
     const savedTheme = localStorage.getItem(THEME_KEY);
-    if (savedTheme === 'light' || savedTheme === 'dark') {
-      setTheme(savedTheme);
-    }
+    if (savedTheme === 'light' || savedTheme === 'dark') setTheme(savedTheme);
   }, []);
-
-  const handleNodesChange = useCallback(
-    (changes) => {
-      // Пересчитываем только при движении НЕ-family узлов
-      const hasPersonMove = changes.some(
-        (c) => c.type === 'position' && !String(c.id).startsWith('family-')
-      );
-
-      if (!hasPersonMove || familiesRef.current.length === 0) {
-        onNodesChange(changes);
-        return;
-      }
-
-      setNodes((prev) => {
-        const updated = applyNodeChanges(changes, prev);
-        return repositionFamilyNodesLive(updated, familiesRef.current, layoutDirection);
-      });
-    },
-    [onNodesChange, setNodes, layoutDirection]
-  );
 
   const handleThemeChange = useCallback((t) => {
     setTheme(t);
@@ -79,15 +64,18 @@ export const GenealogyTree = ({ isLoggedIn = false }) => {
   }, []);
 
   const [viewPersonId, setViewPersonId] = useState(null);
+  const [viewPerson, setViewPerson] = useState(null);
   const [editModalState, setEditModalState] = useState({
-    isOpen: false, mode: 'edit', personData: null,  presetParentIds: null,
+    isOpen: false, mode: 'edit', personData: null, presetParentIds: null,
   });
   const [connectionSource, setConnectionSource] = useState(null);
   const [pendingConnection, setPendingConnection] = useState(null);
 
-  const nodeTypes = useMemo(() => ({ personNode: PersonNode, familyNode: FamilyNode }),  []);
+  const nodeTypes = useMemo(
+    () => ({ personNode: PersonNode, familyNode: FamilyNode }),
+    []
+  );
   const edgeTypes = useMemo(() => ({ relationEdge: RelationEdge }), []);
-  
 
   const deletePersonRef = useRef(null);
   const deleteEdgeRef = useRef(null);
@@ -95,135 +83,136 @@ export const GenealogyTree = ({ isLoggedIn = false }) => {
   const nodesRef = useRef([]);
   const personsRef = useRef([]);
   const familiesRef = useRef([]);
+  const treeIdRef = useRef(null);
+  const allFamiliesRef = useRef([]);
+  const allChildEdgesRef = useRef([]);
 
   useEffect(() => { edgesRef.current = edges; }, [edges]);
   useEffect(() => { nodesRef.current = nodes; }, [nodes]);
 
-  const actions = useRelationActions();
+  /* ---------- Загрузка дерева ---------- */
 
   const fetchTree = useCallback(async () => {
     setLoadError(null);
     try {
-      const res = await apiFetch('/api/tree');
+      const res = await apiFetch('/api/graph');
       if (!res.ok) throw new Error(`Не удалось загрузить дерево (${res.status})`);
       const data = await res.json();
-      personsRef.current = data.nodes || [];
+      allFamiliesRef.current = data.families || [];
+      allChildEdgesRef.current = data.child_edges || [];
 
-      const {
-        rawNodes,
-        families,
-        layoutEdges,
-        parentEdges,
-        familyChildEdges,
-        godparentEdges,
-     } = buildRawGraph(data, {
-        isLoggedIn,
+      const canEdit = Boolean(data.can_edit);
+      setGraphMeta({ tree_id: data.tree_id, can_edit: canEdit });
+      treeIdRef.current = data.tree_id;
+      personsRef.current = data.persons || [];
+
+      const { rawNodes, families, layoutEdges } = buildRawGraph(data, {
+        canEdit,
         layoutDirection,
-        onEdit: (person) => setEditModalState({ isOpen: true, mode: 'edit', personData: person }),
+        onEdit: (person) =>
+          setEditModalState({ isOpen: true, mode: 'edit', personData: person, presetParentIds: null }),
         onDelete: (id) => deletePersonRef.current?.(id),
         onAddConnection: (person) => setConnectionSource(person),
-        onAddChild: (family) => {
-          setEditModalState({
-            isOpen: true,
-            mode: 'add',
-            personData: null,
-            presetParentIds: family.parentIds,
-          });
-        },
-        onRequestDeleteEdge: (edgeId) => {
-          const target = edgesRef.current.find((e) => e.id === edgeId);
-          if (target) deleteEdgeRef.current?.([target]);
-        },
       });
 
-      // Layout по реальным родитель-ребёнок связям
       const { nodes: layoutedNodes } = getLayoutedElements(
         rawNodes,
         layoutEdges,
         layoutDirection,
-        data.marriages || []
+        [] // marriages больше не нужны для layout — семьи позиционируются отдельно
       );
 
-      // Позиционируем FamilyNode по центру линии брака
-      positionFamilyNodes(layoutedNodes, families, layoutDirection);
+      positionFamilyNodes(layoutedNodes, families);
       familiesRef.current = families;
 
-      const marriageEdges = buildMarriageEdges(data.marriages || [], layoutedNodes, {
-        isLoggedIn,
-        layoutDirection,
-        onRequestDeleteEdge: (edgeId) => {
-          const target = edgesRef.current.find((e) => e.id === edgeId);
-          if (target) deleteEdgeRef.current?.([target]);
-        },
-      });
+      const { marriageEdges, childEdges, orphanedEdges, associationEdges } = buildRenderEdges(
+        data,
+        layoutedNodes,
+        {
+          canEdit,
+          layoutDirection,
+          onRequestDeleteEdge: (edgeId) => {
+            const target = edgesRef.current.find((e) => e.id === edgeId);
+            if (target) deleteEdgeRef.current?.([target]);
+          },
+        }
+      );
 
       setNodes(layoutedNodes);
-      setEdges([
-        ...parentEdges,
-        ...familyChildEdges,
-        ...godparentEdges,
-        ...marriageEdges,
-      ]);
+      setEdges([...childEdges, ...orphanedEdges, ...associationEdges, ...marriageEdges]);
     } catch (err) {
       console.error('Ошибка загрузки дерева:', err);
       setLoadError(err.message || 'Ошибка загрузки дерева');
     } finally {
       setLoading(false);
     }
-  }, [isLoggedIn, layoutDirection, setNodes, setEdges]);
+  }, [layoutDirection, setNodes, setEdges]);
 
-
-  const dialog = useDialog();
-  const dialogRef = useRef(dialog);
-  useEffect(() => { dialogRef.current = dialog; }, [dialog]);
+  /* ---------- Удаление персоны ---------- */
 
   const handleDeletePerson = useCallback(async (id) => {
     const ok = await dialogRef.current.confirm({
       title: 'Удалить человека?',
-      description: 'Все его связи также будут удалены. Действие нельзя отменить.',
+      description: 'Все его связи также будут скрыты. Действие можно отменить только через базу.',
       variant: 'danger',
       confirmLabel: 'Удалить',
-      cancelLabel: 'Отмена',
     });
     if (!ok) return;
 
     try {
-      const res = await apiFetch(`/api/persons/${id}`, { method: 'DELETE' });
+      const res = await apiFetch(`/api/individuals/${id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error(`Не удалось удалить (${res.status})`);
       await fetchTree();
     } catch (err) {
       await dialogRef.current.alert({
         title: 'Ошибка удаления',
-        description: err.message || 'Не удалось удалить человека',
+        description: err.message || 'Не удалось удалить',
         variant: 'danger',
         confirmLabel: 'Понятно',
       });
     }
   }, [fetchTree]);
+
   useEffect(() => { deletePersonRef.current = handleDeletePerson; }, [handleDeletePerson]);
 
+  /* ---------- Удаление связей ---------- */
   const handleEdgesDelete = useCallback(async (deleted) => {
-    if (!isLoggedIn || !deleted?.length) return;
+    if (!graphMeta.can_edit || !deleted?.length) return;
 
     const summary = deleted
       .map((e) => {
-        if (e.data?.familyId) {
-          const childName =
-            nodesRef.current.find((n) => n.id === String(e.data.childId))?.data?.first_name || '?';
-          return `Семья → ${childName}`;
+        const kind = e.data?.kind;
+
+        // ⚠️ Прямая родительская связь (второй супруг удалён)
+        if (e.data?.orphaned) {
+          const s = nodesRef.current.find((n) => n.id === String(e.source))?.data?.first_name || '?';
+          const t = nodesRef.current.find((n) => n.id === String(e.target))?.data?.first_name || '?';
+          return `${s} → ${t}`;
         }
-        const s = nodesRef.current.find((n) => n.id === String(e.source))?.data?.first_name || '?';
-        const t = nodesRef.current.find((n) => n.id === String(e.target))?.data?.first_name || '?';
-        return `${s} → ${t}`;
+
+        if (kind === 'marriage') {
+          const s = nodesRef.current.find((n) => n.id === String(e.source))?.data?.first_name || '?';
+          const t = nodesRef.current.find((n) => n.id === String(e.target))?.data?.first_name || '?';
+          return `Брак: ${s} — ${t}`;
+        }
+
+        if (kind === 'godparent') {
+          const s = nodesRef.current.find((n) => n.id === String(e.source))?.data?.first_name || '?';
+          const t = nodesRef.current.find((n) => n.id === String(e.target))?.data?.first_name || '?';
+          return `Крёстный: ${s} → ${t}`;
+        }
+
+        // Обычная family → child
+        const childName = nodesRef.current.find((n) => n.id === String(e.target))?.data?.first_name || '?';
+        return `Семья → ${childName}`;
       })
       .join('\n');
 
     const ok = await dialogRef.current.confirm({
       title: 'Удалить связи?',
-      description: `${summary}\n\nСами люди останутся в дереве.`,
+      description: `${summary}\n\nЛюди останутся в дереве.`,
       variant: 'warning',
       confirmLabel: 'Удалить',
-      cancelLabel: 'Отмена',
     });
     if (!ok) {
       await fetchTree();
@@ -232,124 +221,128 @@ export const GenealogyTree = ({ isLoggedIn = false }) => {
 
     try {
       for (const e of deleted) {
-        if (e.data?.familyId) {
-          const parentIds = e.data.parentIds || [];
-          const childId = e.data.childId;
-          for (const pid of parentIds) {
-            await actions.deleteParentChild(Number(pid), Number(childId));
-          }
-          continue;
-        }
-
         const kind = e.data?.kind;
+
         if (kind === 'marriage') {
-          await actions.deleteMarriage(e.data.marriageId);
+          await apiFetch(`/api/families/${e.data.familyId}`, { method: 'DELETE' });
         } else if (kind === 'godparent') {
-          await actions.deleteRelation(e.data.relationId);
+          await apiFetch(`/api/associations/${e.data.associationId}`, { method: 'DELETE' });
         } else {
-          await actions.deleteParentChild(Number(e.source), Number(e.target));
+          // Сюда попадают И обычные family-child, И orphaned —
+          // у обоих в data есть familyDbId + childId
+          await apiFetch(
+            `/api/family-children/${e.data.familyDbId}/${e.data.childId}`,
+            { method: 'DELETE' }
+          );
         }
       }
     } catch (err) {
       await dialogRef.current.alert({
-        title: 'Ошибка удаления',
-        description: err.message || 'Не удалось удалить связь',
+        title: 'Ошибка',
+        description: err.message || 'Не удалось удалить связи',
         variant: 'danger',
         confirmLabel: 'Понятно',
       });
     } finally {
       await fetchTree();
     }
-  }, [isLoggedIn, fetchTree, actions]);
+  }, [graphMeta.can_edit, fetchTree]);
+
 
   useEffect(() => { deleteEdgeRef.current = handleEdgesDelete; }, [handleEdgesDelete]);
 
-
   useEffect(() => { fetchTree(); }, [fetchTree]);
 
-  const handleConnect = useCallback(
-    async (connection) => {
-      if (!isLoggedIn) return;
+  /* ---------- Drag-and-drop связей (в 4.5) ---------- */
 
-      const sourceId = String(connection.source);
-      const targetId = String(connection.target);
+const handleConnect = useCallback(
+  (connection) => {
+    if (!graphMeta.can_edit) return;
 
-      const sourceIsFamily = sourceId.startsWith('family-');
-      const targetIsFamily = targetId.startsWith('family-');
+    const sourceId = String(connection.source);
+    const targetId = String(connection.target);
+    const sourceIsFamily = sourceId.startsWith('family-');
+    const targetIsFamily = targetId.startsWith('family-');
 
-      // family ↔ family — не поддерживаем
-      if (sourceIsFamily && targetIsFamily) return;
+    // family ↔ family — нельзя
+    if (sourceIsFamily && targetIsFamily) return;
 
-      //Сценарий: одна из сторон — family
-      if (sourceIsFamily || targetIsFamily) {
-        const familyId = sourceIsFamily ? sourceId : targetId;
-        const personIdStr = sourceIsFamily ? targetId : sourceId;
-        const personId = Number(personIdStr);
+    /* --- family ↔ persona --- */
+    if (sourceIsFamily || targetIsFamily) {
+      const familyNodeId = sourceIsFamily ? sourceId : targetId;
+      const personNodeId = sourceIsFamily ? targetId : sourceId;
 
-        const family = familiesRef.current.find((f) => f.id === familyId);
-        if (!family) return;
+      const familyDbId = Number(familyNodeId.replace('family-', ''));
+      const personId = Number(personNodeId);
 
-        // Персона — один из родителей этой семьи → игнорируем.
-        if (family.parentIds.includes(personId)) return;
+      const family = familiesRef.current.find(
+        (f) => f.id === familyNodeId
+      );
+      // Защита: персона не должна быть родителем этой семьи
+      if (family && family.parentIds.includes(personId)) return;
 
-        // Персона уже ребёнок этой семьи → тоже игнорируем.
-        if (family.children.some((c) => c.childId === personId)) return;
+      setPendingConnection({
+        sourceId: personId,
+        targetId: null,
+        familyId: familyDbId,
+      });
+      return;
+    }
 
-        const personName =
-          nodesRef.current.find((n) => n.id === String(personId))?.data?.first_name || 'человек';
+    /* --- persona ↔ persona --- */
+    const sourceNumId = Number(sourceId);
+    const targetNumId = Number(targetId);
+    if (sourceNumId === targetNumId) return;
+    setPendingConnection({
+      sourceId: sourceNumId,
+      targetId: targetNumId,
+      familyId: null,
+    });
+  },
+  [graphMeta.can_edit]
+);
 
-        const kind = await dialogRef.current.choose({
-          title: 'Новая связь',
-          description: `Кем будет «${personName}» для этой пары?`,
-          actions: [
-            { value: 'biological', label: 'Родной ребёнок', variant: 'default' },
-            { value: 'adoptive', label: 'Приёмный ребёнок', variant: 'warning' },
-          ],
-          cancelLabel: 'Отмена',
-        });
-        if (!kind) return;
+  /* ---------- Drag ---------- */
 
-        try {
-          for (const parentId of family.parentIds) {
-            await actions.createParentChild(Number(parentId), personId, kind);
-          }
-          await fetchTree();
-        } catch (err) {
-          await dialogRef.current.alert({
-            title: 'Ошибка',
-            description: err.message || 'Не удалось создать связь',
-            variant: 'danger',
-            confirmLabel: 'Понятно',
-          });
-          await fetchTree();
-        }
+  const handleNodesChange = useCallback(
+    (changes) => {
+      const hasPersonMove = changes.some(
+        (c) => c.type === 'position' && !String(c.id).startsWith('family-')
+      );
+
+      if (!hasPersonMove || familiesRef.current.length === 0) {
+        onNodesChange(changes);
         return;
       }
 
-      //Обычный случай: персона ↔ персона
-      const sourceNumId = Number(sourceId);
-      const targetNumId = Number(targetId);
-      if (sourceNumId === targetNumId) return;
-      setPendingConnection({ sourceId: sourceNumId, targetId: targetNumId });
+      setNodes((prev) => {
+        const updated = applyNodeChanges(changes, prev);
+        return repositionFamilyNodesLive(updated, familiesRef.current);
+      });
     },
-    [isLoggedIn, actions, fetchTree]
+    [onNodesChange, setNodes]
   );
 
+  /* ---------- Прочее ---------- */
 
   const handleAddRootPerson = () => {
-    setEditModalState({ isOpen: true, mode: 'add', personData: null });
+    setEditModalState({ isOpen: true, mode: 'add', personData: null, presetParentIds: null });
   };
 
   const isEmpty = !loading && nodes.length === 0;
-  const showTopLeftAddButton = isLoggedIn && !isEmpty;
+  const canEdit = graphMeta.can_edit;
+  const showTopLeftAddButton = canEdit && !isEmpty;
 
   if (loading) {
-    return <div className="flex items-center justify-center h-screen text-gray-500">Загрузка дерева...</div>;
+    return (
+      <div className="flex items-center justify-center h-screen text-gray-500">
+        Загрузка дерева...
+      </div>
+    );
   }
 
   return (
     <div className="w-full h-screen bg-slate-50 relative">
-      {/* Верхний левый угол: кнопка «Меню» + «Добавить человека» */}
       <div className="absolute top-4 left-4 z-20 flex items-center gap-3">
         <button
           onClick={() => setMenuOpen(true)}
@@ -387,18 +380,22 @@ export const GenealogyTree = ({ isLoggedIn = false }) => {
         onEdgesChange={onEdgesChange}
         onNodeClick={(_, node) => {
           if (node.type === 'familyNode') return;
-          setViewPersonId(node.data.id);
+          if (canEdit) {
+            setViewPersonId(node.data.id);
+          } else {
+            setViewPerson(node.data);
+          }
         }}
         onConnect={handleConnect}
         onEdgesDelete={handleEdgesDelete}
-        nodesConnectable={isLoggedIn}
-        nodesFocusable={isLoggedIn}
-        edgesFocusable={isLoggedIn}
-        elementsSelectable={isLoggedIn}
-        deleteKeyCode={isLoggedIn ? ['Backspace', 'Delete'] : null}
+        connectionMode={ConnectionMode.Loose}
+        nodesConnectable={canEdit}
+        nodesFocusable={canEdit}
+        edgesFocusable={canEdit}
+        elementsSelectable={canEdit}
+        deleteKeyCode={canEdit ? ['Backspace', 'Delete'] : null}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
-        connectionMode={ConnectionMode.Loose}
         fitView
       >
         <Background color="#cbd5e1" gap={16} />
@@ -409,19 +406,17 @@ export const GenealogyTree = ({ isLoggedIn = false }) => {
         <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
           <div className="pointer-events-auto bg-white rounded-2xl shadow-xl border border-gray-200 p-8 max-w-sm text-center space-y-4">
             <div className="w-16 h-16 mx-auto rounded-full bg-blue-50 flex items-center justify-center">
-              {isLoggedIn ? <UserPlus className="w-8 h-8 text-blue-600" /> : <Lock className="w-8 h-8 text-amber-500" />}
+              {canEdit ? <UserPlus className="w-8 h-8 text-blue-600" /> : <Lock className="w-8 h-8 text-amber-500" />}
             </div>
             <h2 className="text-lg font-bold text-gray-800">
               {loadError ? 'Не удалось загрузить дерево' : 'Дерево пока пустое'}
             </h2>
             <p className="text-sm text-gray-500">
-              {isLoggedIn
-                ? loadError
-                  ? 'Попробуйте добавить человека — данные сохранятся.'
-                  : 'Создайте первую персону, чтобы начать строить дерево.'
+              {canEdit
+                ? 'Создайте первую персону, чтобы начать строить дерево.'
                 : 'Войдите, чтобы добавить первых людей.'}
             </p>
-            {isLoggedIn ? (
+            {canEdit ? (
               <button
                 onClick={handleAddRootPerson}
                 className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-sm"
@@ -435,20 +430,24 @@ export const GenealogyTree = ({ isLoggedIn = false }) => {
         </div>
       )}
 
-      {!isLoggedIn && (
+      {!canEdit && (
         <PersonViewModal
-          personId={viewPersonId}
-          isOpen={Boolean(viewPersonId)}
-          onClose={() => setViewPersonId(null)}
+          person={viewPerson}
+          isOpen={Boolean(viewPerson)}
+          onClose={() => setViewPerson(null)}
         />
       )}
 
-      {isLoggedIn && (
+      {canEdit && (
         <PersonExtendedViewModal
           personId={viewPersonId}
           isOpen={Boolean(viewPersonId)}
           onClose={() => setViewPersonId(null)}
           onRefresh={fetchTree}
+          onAddConnection={(person) => {
+            setViewPersonId(null);
+            setConnectionSource(person);
+          }}
         />
       )}
 
@@ -456,17 +455,22 @@ export const GenealogyTree = ({ isLoggedIn = false }) => {
         isOpen={editModalState.isOpen}
         mode={editModalState.mode}
         personData={editModalState.personData}
+        treeId={graphMeta.tree_id}
         onClose={() => setEditModalState((s) => ({ ...s, isOpen: false, presetParentIds: null }))}
         onRefresh={fetchTree}
       />
 
-      {isLoggedIn && (
+      {canEdit && (
         <ConnectionModal
           isOpen={Boolean(connectionSource) || Boolean(pendingConnection)}
           sourcePerson={connectionSource}
           presetSourceId={pendingConnection?.sourceId ?? null}
           presetTargetId={pendingConnection?.targetId ?? null}
+          presetFamilyId={pendingConnection?.familyId ?? null}
+          treeId={graphMeta.tree_id}
           allPersons={personsRef.current}
+          allFamilies={allFamiliesRef.current}
+          allChildEdges={allChildEdgesRef.current}
           onClose={() => {
             setConnectionSource(null);
             setPendingConnection(null);
@@ -475,7 +479,6 @@ export const GenealogyTree = ({ isLoggedIn = false }) => {
         />
       )}
 
-      {/* Drawer вынесен из верхнего блока — это fixed-панель */}
       <SideMenu
         isOpen={menuOpen}
         onClose={() => setMenuOpen(false)}

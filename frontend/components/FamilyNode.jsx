@@ -15,15 +15,18 @@ const SOURCE_POS = {
 export const FamilyNode = ({ data }) => {
   const direction = data?.layoutDirection || 'TB';
   const sourcePos = SOURCE_POS[direction] || SOURCE_POS.TB;
-  const isAdoptive = data?.kind === 'adoptive';
-  const isDivorced =
-    data?.marriageStatus === 'divorced' || data?.marriageStatus === 'widowed';
+  const status = data?.status || 'married';
 
-  const bgClass = isDivorced
-    ? 'bg-gray-400/50'
-    : isAdoptive
-      ? 'bg-purple-400/50'
-      : 'bg-rose-400/50';
+  const hasBothSpouses = Boolean(data?.spouse1_id) && Boolean(data?.spouse2_id);
+  const isDivorced = status === 'divorced' || status === 'widowed';
+  const isPartners = status === 'partners';
+
+  const bgClass =
+    isDivorced || !hasBothSpouses
+      ? 'bg-gray-400/40'
+      : isPartners
+        ? 'bg-indigo-400/50'
+        : 'bg-rose-400/50';
 
   return (
     <div
@@ -32,9 +35,8 @@ export const FamilyNode = ({ data }) => {
     >
       <div
         className={`w-full h-full rounded-full shadow-sm ${bgClass}`}
-        title="Семья"
+        title={`Семья (${status})`}
       />
-
       <Handle
         id="flow-source"
         type="source"

@@ -3,15 +3,10 @@
 import { useState, useEffect, useCallback } from 'react';
 import { apiFetch, setAuthToken, clearAuthToken, getAuthToken } from '@/lib/api';
 
-/**
- * Хук авторизации.
- * Сейчас работает с фейковым токеном из localStorage.
- * Когда добавятся сессии — поменяется только реализация login/logout,
- * все компоненты, использующие useAuth, останутся без изменений.
- */
 export function useAuth() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [user, setUser] = useState(null);
 
   const checkAuth = useCallback(async () => {
     setIsLoading(true);
@@ -19,12 +14,21 @@ export function useAuth() {
       const token = getAuthToken();
       if (!token) {
         setIsLoggedIn(false);
+        setUser(null);
         return;
       }
       const res = await apiFetch('/api/auth/me');
-      setIsLoggedIn(res.ok);
+      if (res.ok) {
+        const data = await res.json();
+        setUser(data);
+        setIsLoggedIn(true);
+      } else {
+        setIsLoggedIn(false);
+        setUser(null);
+      }
     } catch {
       setIsLoggedIn(false);
+      setUser(null);
     } finally {
       setIsLoading(false);
     }
@@ -34,17 +38,33 @@ export function useAuth() {
     checkAuth();
   }, [checkAuth]);
 
-  const login = useCallback(() => {
-    // TODO (этап 5): заменить на реальный login с email/password
-    setAuthToken('dev-token');
+  const login = useCallback(async (email, password) => {
+    const res = await apiFetch('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Неверный email или пароль');
+    }
+    const data = await res.json();
+    // token = email (текущая заглушка бэка)
+    setAuthToken(data.token);
+    setUser(data.user);
     setIsLoggedIn(true);
+    return data.user;
   }, []);
 
-  const logout = useCallback(() => {
-    // TODO (этап 5): DELETE /api/auth/session
+  const logout = useCallback(async () => {
+    try {
+      await apiFetch('/api/auth/logout', { method: 'POST' });
+    } catch {
+      /* игнорируем */
+    }
     clearAuthToken();
     setIsLoggedIn(false);
+    setUser(null);
   }, []);
 
-  return { isLoggedIn, isLoading, login, logout, refresh: checkAuth };
+  return { isLoggedIn, isLoading, user, login, logout, refresh: checkAuth };
 }
