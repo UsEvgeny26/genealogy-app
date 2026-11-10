@@ -4,16 +4,20 @@
 import re
 from datetime import date as date_cls
 from typing import Optional
+from sqlalchemy import select
 
 from ged4py import GedcomReader
 
 from models import (
     ChildRelationType,
+    Event,
+    EventType,
     Family,
     FamilyChild,
     FamilyStatus,
     Gender,
     Individual,
+    Place,
 )
 
 
@@ -35,11 +39,32 @@ MONTHS_EN = {
     "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
 }
 
+VALUE_EVENTS = {
+    "OCCU": EventType.OCCUPATION,
+    "EDUC": EventType.EDUCATION,
+    "RELI": EventType.RELIGION,
+}
 
-# ---------------------------------------------------------------------------
+DATE_EVENTS_PERSON = {
+    "BIRT": EventType.BIRTH,
+    "DEAT": EventType.DEATH,
+    "BURI": EventType.BURIAL,
+    "CREM": EventType.CREMATION,
+    "BAPM": EventType.BAPTISM,
+    "MILI": EventType.MILITARY,
+    "IMMI": EventType.IMMIGRATION,
+    "EMIG": EventType.EMIGRATION,
+    "RESI": EventType.RESIDENCE,
+}
+
+DATE_EVENTS_FAMILY = {
+    "MARR": EventType.MARRIAGE,
+    "DIV": EventType.DIVORCE,
+    "ENGA": EventType.ENGAGEMENT,
+}
+
+
 # Даты
-# ---------------------------------------------------------------------------
-
 def _format_date_ru(date_value) -> Optional[str]:
     """
     Превращает DateValue (или строку) в '3 июня 1930'.
@@ -141,10 +166,7 @@ def _parse_gedcom_date_ru(s: str) -> Optional[str]:
     return s
 
 
-# ---------------------------------------------------------------------------
 # Безопасное извлечение значений
-# ---------------------------------------------------------------------------
-
 def _value_of(record) -> Optional[str]:
     """Достаёт .value (str/tuple/DateValue) и приводит к строке."""
     if record is None:
@@ -212,10 +234,7 @@ def _pointer_list(record, tag: str) -> list[str]:
     return result
 
 
-# ---------------------------------------------------------------------------
 # Извлечение полей
-# ---------------------------------------------------------------------------
-
 def _extract_name_parts(record) -> tuple[Optional[str], Optional[str], Optional[str]]:
     given = _path_value(record, "NAME/GIVN")
     sur = _path_value(record, "NAME/SURN")
@@ -262,10 +281,98 @@ def _extract_sex(record) -> Gender:
     return GENDER_MAP.get(sex.upper(), Gender.UNKNOWN)
 
 
-# ---------------------------------------------------------------------------
-# Импорт
-# ---------------------------------------------------------------------------
+def _get_or_create_place(tree_id: int, name: Optional[str], db) -> Optional[int]:
+    if not name:
+        return None
+    name = name.strip()
+    if not name:
+        return None
+    existing = db.scalar(
+        select(Place).where(Place.tree_id == tree_id, Place.name == name)
+    )
+    if existing:
+        return existing.id
+    place = Place(tree_id=tree_id, name=name)
+    db.add(place)
+    db.flush()
+    return place.id
 
+def _import_events_for_record(
+    rec,
+    tree_id: int,
+    db,
+    individual_id: Optional[int] = None,
+    family_id: Optional[int] = None,
+) -> None:
+    """Импортирует все события персоны или семьи из GEDCOM-записи."""
+    tags_map = VALUE_EVENTS if individual_id else {}
+    date_map = DATE_EVENTS_PERSON if individual_id else DATE_EVENTS_FAMILY
+    # У персоны есть и VALUE_EVENTS, и DATE_EVENTS_PERSON.
+    # У семьи — только DATE_EVENTS_FAMILY.
+
+    if individual_id is not None:
+        # VALUE_EVENTS
+        for tag, et in VALUE_EVENTS.items():
+            sub = rec.sub_tag(tag)
+            if sub is None:
+                continue
+            db.add(Event(
+                tree_id=tree_id,
+                individual_id=individual_id,
+                family_id=None,
+                event_type=et,
+                date_str=None,
+                place_id=None,
+                description=_value_of(sub),
+            ))
+
+        # DATE_EVENTS_PERSON
+        for tag, et in DATE_EVENTS_PERSON.items():
+            sub = rec.sub_tag(tag)
+            if sub is None:
+                continue
+            date_str = None
+            place_id = None
+            date_rec = sub.sub_tag("DATE")
+            if date_rec is not None:
+                date_str = _format_date_ru(date_rec.value)
+            place_rec = sub.sub_tag("PLAC")
+            if place_rec is not None:
+                place_id = _get_or_create_place(tree_id, _value_of(place_rec), db)
+            db.add(Event(
+                tree_id=tree_id,
+                individual_id=individual_id,
+                family_id=None,
+                event_type=et,
+                date_str=date_str,
+                place_id=place_id,
+                description=None,
+            ))
+    elif family_id is not None:
+        for tag, et in DATE_EVENTS_FAMILY.items():
+            sub = rec.sub_tag(tag)
+            if sub is None:
+                continue
+            date_str = None
+            place_id = None
+            date_rec = sub.sub_tag("DATE")
+            if date_rec is not None:
+                date_str = _format_date_ru(date_rec.value)
+            place_rec = sub.sub_tag("PLAC")
+            if place_rec is not None:
+                place_id = _get_or_create_place(tree_id, _value_of(place_rec), db)
+            db.add(Event(
+                tree_id=tree_id,
+                individual_id=None,
+                family_id=family_id,
+                event_type=et,
+                date_str=date_str,
+                place_id=place_id,
+                description=None,
+            ))
+
+
+# Импорт
 def import_gedcom(ged_path: str, tree_id: int, db) -> dict:
     xref_to_individual = {}
     individuals_count = 0
@@ -297,6 +404,7 @@ def import_gedcom(ged_path: str, tree_id: int, db) -> dict:
             db.flush()
             xref_to_individual[rec.xref_id] = ind
             individuals_count += 1
+            _import_events_for_record(rec, tree_id, db, individual_id=ind.id)
 
         for rec in parser.records0("FAM"):
             husb_xref = _pointer_xref(rec, "HUSB")
@@ -325,6 +433,7 @@ def import_gedcom(ged_path: str, tree_id: int, db) -> dict:
             db.add(fam)
             db.flush()
             families_count += 1
+            _import_events_for_record(rec, tree_id, db, family_id=fam.id)
 
             for child_xref in _pointer_list(rec, "CHIL"):
                 child = xref_to_individual.get(child_xref)

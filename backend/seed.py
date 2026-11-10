@@ -5,7 +5,7 @@ Seed-скрипт: создаёт demo-пользователя и наполн�
 Запуск:
     python seed.py
 """
-import hashlib
+from auth import hash_password as _hash_password
 import sys
 from pathlib import Path
 
@@ -22,12 +22,6 @@ DEMO_DISPLAY_NAME = "Demo User"
 DEMO_TREE_NAME = "Демо-дерево"
 
 GED_PATH = Path(__file__).parent / "test-family.ged"
-
-
-def _hash_password(password: str) -> str:
-    """Та же заглушка, что и в main.py (этап 6 заменит на bcrypt)."""
-    return "DEV:" + hashlib.sha256(password.encode()).hexdigest()
-
 
 def main() -> int:
     Base.metadata.create_all(bind=engine)

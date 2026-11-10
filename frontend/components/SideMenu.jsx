@@ -1,22 +1,21 @@
 'use client';
 
-import React, { useEffect } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   X, ArrowDown, ArrowUp, ArrowRight, ArrowLeft, Check,
-  Sun, Moon, Palette, Eye, Rows3,
+  Sun, Moon, Palette, Eye, Rows3, Download, Upload, Loader2,
 } from 'lucide-react';
-
-/* ---------- примитивы для секций ---------- */
+import { apiFetch } from '@/lib/api';
 
 function Section({ title, children, badge }) {
   return (
-    <div className="px-4 py-3 border-b border-gray-100 last:border-b-0">
+    <div className="px-4 py-3 border-b border-gray-100 dark:border-slate-800 last:border-b-0">
       <div className="flex items-center justify-between mb-2">
-        <span className="text-[11px] font-bold uppercase tracking-wider text-gray-400">
+        <span className="text-[11px] font-bold uppercase tracking-wider text-gray-400 dark:text-slate-500">
           {title}
         </span>
         {badge && (
-          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">
+          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-gray-100 dark:bg-slate-800 text-gray-500 dark:text-slate-400">
             {badge}
           </span>
         )}
@@ -33,10 +32,10 @@ function OptionButton({ active, icon: Icon, label, onClick, disabled }) {
       disabled={disabled}
       className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
         active
-          ? 'bg-blue-50 text-blue-700 ring-1 ring-blue-200'
+          ? 'bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 ring-1 ring-blue-200 dark:ring-blue-800'
           : disabled
-            ? 'text-gray-300 cursor-not-allowed'
-            : 'text-gray-700 hover:bg-gray-50'
+            ? 'text-gray-300 dark:text-slate-600 cursor-not-allowed'
+            : 'text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800'
       }`}
     >
       {Icon && <Icon className="w-4 h-4 shrink-0" />}
@@ -45,8 +44,6 @@ function OptionButton({ active, icon: Icon, label, onClick, disabled }) {
     </button>
   );
 }
-
-/* ---------- направления ---------- */
 
 const DIRECTIONS = [
   { value: 'TB', label: 'Сверху вниз',   Icon: ArrowDown },
@@ -60,8 +57,6 @@ const THEMES = [
   { value: 'dark',  label: 'Тёмная',  Icon: Moon },
 ];
 
-/* ---------- основной компонент ---------- */
-
 export const SideMenu = ({
   isOpen,
   onClose,
@@ -69,14 +64,85 @@ export const SideMenu = ({
   onDirectionChange,
   theme,
   onThemeChange,
+  treeId,
+  onAfterImport,
 }) => {
-  // Escape закрывает
+  const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const fileInputRef = useRef(null);
+
   useEffect(() => {
     if (!isOpen) return;
     const onKey = (e) => { if (e.key === 'Escape') onClose(); };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [isOpen, onClose]);
+
+  const handleExport = async () => {
+    if (!treeId) return;
+    setExporting(true);
+    try {
+      const res = await apiFetch(`/api/trees/${treeId}/export-gedcom`);
+      if (!res.ok) throw new Error(`Ошибка экспорта (${res.status})`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+
+      const cd = res.headers.get('Content-Disposition') || '';
+      const utf8Match = cd.match(/filename\*=UTF-8''([^;]+)/i);
+      const asciiMatch = cd.match(/filename="([^"]+)"/);
+      if (utf8Match) {
+        a.download = decodeURIComponent(utf8Match[1]);
+      } else if (asciiMatch) {
+        a.download = asciiMatch[1];
+      } else {
+        a.download = 'tree.ged';
+      }
+
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      alert(err.message || 'Не удалось экспортировать');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const handleImportClick = () => fileInputRef.current?.click();
+
+  const handleFileChange = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    if (!confirm(
+      `Импортировать «${file.name}» в новое дерево?\n\n` +
+      `Текущее дерево не изменится — создастся новое.`
+    )) return;
+
+    setImporting(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await apiFetch('/api/trees/import-gedcom', {
+        method: 'POST',
+        body: fd,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `Ошибка импорта (${res.status})`);
+      }
+      const newTree = await res.json();
+      onAfterImport?.(newTree);
+    } catch (err) {
+      alert(err.message || 'Не удалось импортировать');
+    } finally {
+      setImporting(false);
+    }
+  };
 
   return (
     <>
@@ -90,25 +156,23 @@ export const SideMenu = ({
 
       {/* Drawer */}
       <aside
-        className={`fixed top-0 left-0 h-full w-80 bg-white shadow-2xl z-40 flex flex-col transition-transform duration-300 ease-out ${
+        className={`fixed top-0 left-0 h-full w-80 bg-white dark:bg-slate-900 shadow-2xl z-40 flex flex-col transition-transform duration-300 ease-out ${
           isOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
-        {/* Шапка */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 dark:border-slate-800">
           <div>
-            <h2 className="text-sm font-bold text-gray-800">Настройки дерева</h2>
-            <p className="text-[11px] text-gray-400 mt-0.5">Вид и поведение</p>
+            <h2 className="text-sm font-bold text-gray-800 dark:text-slate-100">Настройки дерева</h2>
+            <p className="text-[11px] text-gray-400 dark:text-slate-500 mt-0.5">Вид и поведение</p>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+            className="p-1.5 text-gray-400 dark:text-slate-500 hover:text-gray-600 dark:hover:text-slate-300 hover:bg-gray-100 dark:hover:bg-slate-800 rounded-lg transition-colors"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Секции */}
         <div className="flex-1 overflow-y-auto">
           <Section title="Направление">
             <div className="space-y-0.5">
@@ -124,7 +188,7 @@ export const SideMenu = ({
             </div>
           </Section>
 
-          <Section title="Тема" badge="UI">
+          <Section title="Тема">
             <div className="flex gap-2">
               {THEMES.map((t) => {
                 const active = theme === t.value;
@@ -134,20 +198,56 @@ export const SideMenu = ({
                     onClick={() => onThemeChange(t.value)}
                     className={`flex-1 flex flex-col items-center gap-1 px-2 py-3 rounded-lg border-2 transition-all ${
                       active
-                        ? 'border-blue-500 bg-blue-50'
-                        : 'border-gray-200 hover:border-gray-300'
+                        ? 'border-blue-500 bg-blue-50 dark:bg-blue-950'
+                        : 'border-gray-200 dark:border-slate-700 hover:border-gray-300 dark:hover:border-slate-600'
                     }`}
                   >
-                    <t.Icon className={`w-4 h-4 ${active ? 'text-blue-600' : 'text-gray-500'}`} />
-                    <span className={`text-[11px] font-medium ${active ? 'text-blue-700' : 'text-gray-600'}`}>
+                    <t.Icon className={`w-4 h-4 ${active ? 'text-blue-600 dark:text-blue-400' : 'text-gray-500 dark:text-slate-400'}`} />
+                    <span className={`text-[11px] font-medium ${active ? 'text-blue-700 dark:text-blue-300' : 'text-gray-600 dark:text-slate-400'}`}>
                       {t.label}
                     </span>
                   </button>
                 );
               })}
             </div>
-            <p className="text-[10px] text-gray-400 mt-2">
-              Применится к карточкам и холсту в следующей итерации
+          </Section>
+
+          <Section title="Экспорт">
+            <button
+              onClick={handleExport}
+              disabled={!treeId || exporting}
+              className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+              <span className="flex-1 text-left">
+                {exporting ? 'Скачивание...' : 'Скачать GEDCOM (.ged)'}
+              </span>
+            </button>
+            <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-1">
+              Совместим с MyHeritage, Gramps, Ancestry
+            </p>
+          </Section>
+
+          <Section title="Импорт">
+            <button
+              onClick={handleImportClick}
+              disabled={importing}
+              className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {importing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+              <span className="flex-1 text-left">
+                {importing ? 'Импорт...' : 'Загрузить GEDCOM (.ged)'}
+              </span>
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".ged,.txt"
+              onChange={handleFileChange}
+              className="hidden"
+            />
+            <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-1">
+              Создастся новое дерево. Текущее останется без изменений.
             </p>
           </Section>
 
@@ -166,8 +266,7 @@ export const SideMenu = ({
           </Section>
         </div>
 
-        {/* Подвал */}
-        <div className="px-4 py-3 border-t border-gray-100 text-[10px] text-gray-400 text-center">
+        <div className="px-4 py-3 border-t border-gray-100 dark:border-slate-800 text-[10px] text-gray-400 dark:text-slate-500 text-center">
           Настройки сохраняются локально
         </div>
       </aside>

@@ -10,7 +10,7 @@ export default function RootPage() {
 
   useEffect(() => {
     if (isLoading) return;
-    router.replace(isLoggedIn ? '/tree' : '/login');
+    router.replace(isLoggedIn ? '/trees' : '/login');
   }, [isLoading, isLoggedIn, router]);
 
   return (

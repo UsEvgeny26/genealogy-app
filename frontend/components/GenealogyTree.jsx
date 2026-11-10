@@ -22,13 +22,13 @@ import {
 } from '@/lib/layout';
 import { buildRawGraph, buildRenderEdges } from '@/lib/tree-adapter';
 import { useDialog } from './DialogProvider';
-import { UserPlus, AlertCircle, Lock, Menu } from 'lucide-react';
+import { useTheme } from '@/hooks/useTheme';
+import { UserPlus, AlertCircle, Lock, Menu, ArrowLeft } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 
-const THEME_KEY = 'tree-theme';
 const DIRECTION_KEY = 'tree-direction';
 
-export const GenealogyTree = () => {
+export const GenealogyTree = ({ treeId, onBack }) => {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [loading, setLoading] = useState(true);
@@ -38,24 +38,20 @@ export const GenealogyTree = () => {
 
   const [layoutDirection, setLayoutDirection] = useState('TB');
   const [menuOpen, setMenuOpen] = useState(false);
-  const [theme, setTheme] = useState('light');
+
+  const { theme, setTheme: handleThemeChange } = useTheme();
 
   const dialog = useDialog();
   const dialogRef = useRef(dialog);
   useEffect(() => { dialogRef.current = dialog; }, [dialog]);
 
-  // Настройки
+  // Восстановление направления из localStorage
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const savedDir = localStorage.getItem(DIRECTION_KEY);
-    if (savedDir && ['TB', 'BT', 'LR', 'RL'].includes(savedDir)) setLayoutDirection(savedDir);
-    const savedTheme = localStorage.getItem(THEME_KEY);
-    if (savedTheme === 'light' || savedTheme === 'dark') setTheme(savedTheme);
-  }, []);
-
-  const handleThemeChange = useCallback((t) => {
-    setTheme(t);
-    if (typeof window !== 'undefined') localStorage.setItem(THEME_KEY, t);
+    if (savedDir && ['TB', 'BT', 'LR', 'RL'].includes(savedDir)) {
+      setLayoutDirection(savedDir);
+    }
   }, []);
 
   const handleDirectionChange = useCallback((dir) => {
@@ -66,7 +62,7 @@ export const GenealogyTree = () => {
   const [viewPersonId, setViewPersonId] = useState(null);
   const [viewPerson, setViewPerson] = useState(null);
   const [editModalState, setEditModalState] = useState({
-    isOpen: false, mode: 'edit', personData: null, presetParentIds: null,
+    isOpen: false, mode: 'edit', personData: null,
   });
   const [connectionSource, setConnectionSource] = useState(null);
   const [pendingConnection, setPendingConnection] = useState(null);
@@ -83,34 +79,39 @@ export const GenealogyTree = () => {
   const nodesRef = useRef([]);
   const personsRef = useRef([]);
   const familiesRef = useRef([]);
-  const treeIdRef = useRef(null);
-  const allFamiliesRef = useRef([]);
   const allChildEdgesRef = useRef([]);
+  const allFamiliesRef = useRef([]);
 
   useEffect(() => { edgesRef.current = edges; }, [edges]);
   useEffect(() => { nodesRef.current = nodes; }, [nodes]);
 
-  /* ---------- Загрузка дерева ---------- */
+  /*  Загрузка  */
 
   const fetchTree = useCallback(async () => {
     setLoadError(null);
     try {
-      const res = await apiFetch('/api/graph');
-      if (!res.ok) throw new Error(`Не удалось загрузить дерево (${res.status})`);
+      const url = treeId
+        ? `/api/graph?tree_id=${treeId}`
+        : '/api/graph';
+      const res = await apiFetch(url);
+      if (!res.ok) {
+        // Читаем ошибку от FastAPI (например, "Дерево не найдено" или "Нет доступа")
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `Ошибка загрузки дерева (${res.status})`);
+      }
       const data = await res.json();
-      allFamiliesRef.current = data.families || [];
-      allChildEdgesRef.current = data.child_edges || [];
 
       const canEdit = Boolean(data.can_edit);
       setGraphMeta({ tree_id: data.tree_id, can_edit: canEdit });
-      treeIdRef.current = data.tree_id;
       personsRef.current = data.persons || [];
+      allFamiliesRef.current = data.families || [];
+      allChildEdgesRef.current = data.child_edges || [];
 
       const { rawNodes, families, layoutEdges } = buildRawGraph(data, {
         canEdit,
         layoutDirection,
         onEdit: (person) =>
-          setEditModalState({ isOpen: true, mode: 'edit', personData: person, presetParentIds: null }),
+          setEditModalState({ isOpen: true, mode: 'edit', personData: person }),
         onDelete: (id) => deletePersonRef.current?.(id),
         onAddConnection: (person) => setConnectionSource(person),
       });
@@ -119,7 +120,7 @@ export const GenealogyTree = () => {
         rawNodes,
         layoutEdges,
         layoutDirection,
-        [] // marriages больше не нужны для layout — семьи позиционируются отдельно
+        []
       );
 
       positionFamilyNodes(layoutedNodes, families);
@@ -146,9 +147,9 @@ export const GenealogyTree = () => {
     } finally {
       setLoading(false);
     }
-  }, [layoutDirection, setNodes, setEdges]);
+  }, [treeId, layoutDirection, setNodes, setEdges]);
 
-  /* ---------- Удаление персоны ---------- */
+  /*  Удаление персоны  */
 
   const handleDeletePerson = useCallback(async (id) => {
     const ok = await dialogRef.current.confirm({
@@ -175,34 +176,29 @@ export const GenealogyTree = () => {
 
   useEffect(() => { deletePersonRef.current = handleDeletePerson; }, [handleDeletePerson]);
 
-  /* ---------- Удаление связей ---------- */
+  /*  Удаление рёбер  */
+
   const handleEdgesDelete = useCallback(async (deleted) => {
     if (!graphMeta.can_edit || !deleted?.length) return;
 
     const summary = deleted
       .map((e) => {
-        const kind = e.data?.kind;
-
-        // ⚠️ Прямая родительская связь (второй супруг удалён)
         if (e.data?.orphaned) {
           const s = nodesRef.current.find((n) => n.id === String(e.source))?.data?.first_name || '?';
           const t = nodesRef.current.find((n) => n.id === String(e.target))?.data?.first_name || '?';
           return `${s} → ${t}`;
         }
-
+        const kind = e.data?.kind;
         if (kind === 'marriage') {
           const s = nodesRef.current.find((n) => n.id === String(e.source))?.data?.first_name || '?';
           const t = nodesRef.current.find((n) => n.id === String(e.target))?.data?.first_name || '?';
           return `Брак: ${s} — ${t}`;
         }
-
         if (kind === 'godparent') {
           const s = nodesRef.current.find((n) => n.id === String(e.source))?.data?.first_name || '?';
           const t = nodesRef.current.find((n) => n.id === String(e.target))?.data?.first_name || '?';
           return `Крёстный: ${s} → ${t}`;
         }
-
-        // Обычная family → child
         const childName = nodesRef.current.find((n) => n.id === String(e.target))?.data?.first_name || '?';
         return `Семья → ${childName}`;
       })
@@ -228,8 +224,6 @@ export const GenealogyTree = () => {
         } else if (kind === 'godparent') {
           await apiFetch(`/api/associations/${e.data.associationId}`, { method: 'DELETE' });
         } else {
-          // Сюда попадают И обычные family-child, И orphaned —
-          // у обоих в data есть familyDbId + childId
           await apiFetch(
             `/api/family-children/${e.data.familyDbId}/${e.data.childId}`,
             { method: 'DELETE' }
@@ -248,61 +242,53 @@ export const GenealogyTree = () => {
     }
   }, [graphMeta.can_edit, fetchTree]);
 
-
   useEffect(() => { deleteEdgeRef.current = handleEdgesDelete; }, [handleEdgesDelete]);
 
   useEffect(() => { fetchTree(); }, [fetchTree]);
 
-  /* ---------- Drag-and-drop связей (в 4.5) ---------- */
+  /*  Connect через drag  */
 
-const handleConnect = useCallback(
-  (connection) => {
-    if (!graphMeta.can_edit) return;
+  const handleConnect = useCallback(
+    (connection) => {
+      if (!graphMeta.can_edit) return;
 
-    const sourceId = String(connection.source);
-    const targetId = String(connection.target);
-    const sourceIsFamily = sourceId.startsWith('family-');
-    const targetIsFamily = targetId.startsWith('family-');
+      const sourceId = String(connection.source);
+      const targetId = String(connection.target);
+      const sourceIsFamily = sourceId.startsWith('family-');
+      const targetIsFamily = targetId.startsWith('family-');
 
-    // family ↔ family — нельзя
-    if (sourceIsFamily && targetIsFamily) return;
+      if (sourceIsFamily && targetIsFamily) return;
 
-    /* --- family ↔ persona --- */
-    if (sourceIsFamily || targetIsFamily) {
-      const familyNodeId = sourceIsFamily ? sourceId : targetId;
-      const personNodeId = sourceIsFamily ? targetId : sourceId;
+      if (sourceIsFamily || targetIsFamily) {
+        const familyNodeId = sourceIsFamily ? sourceId : targetId;
+        const personNodeId = sourceIsFamily ? targetId : sourceId;
+        const familyDbId = Number(familyNodeId.replace('family-', ''));
+        const personId = Number(personNodeId);
 
-      const familyDbId = Number(familyNodeId.replace('family-', ''));
-      const personId = Number(personNodeId);
+        const family = familiesRef.current.find((f) => f.id === familyNodeId);
+        if (family && family.parentIds.includes(personId)) return;
 
-      const family = familiesRef.current.find(
-        (f) => f.id === familyNodeId
-      );
-      // Защита: персона не должна быть родителем этой семьи
-      if (family && family.parentIds.includes(personId)) return;
+        setPendingConnection({
+          sourceId: personId,
+          targetId: null,
+          familyId: familyDbId,
+        });
+        return;
+      }
 
+      const sourceNumId = Number(sourceId);
+      const targetNumId = Number(targetId);
+      if (sourceNumId === targetNumId) return;
       setPendingConnection({
-        sourceId: personId,
-        targetId: null,
-        familyId: familyDbId,
+        sourceId: sourceNumId,
+        targetId: targetNumId,
+        familyId: null,
       });
-      return;
-    }
+    },
+    [graphMeta.can_edit]
+  );
 
-    /* --- persona ↔ persona --- */
-    const sourceNumId = Number(sourceId);
-    const targetNumId = Number(targetId);
-    if (sourceNumId === targetNumId) return;
-    setPendingConnection({
-      sourceId: sourceNumId,
-      targetId: targetNumId,
-      familyId: null,
-    });
-  },
-  [graphMeta.can_edit]
-);
-
-  /* ---------- Drag ---------- */
+  /*  Drag узлов  */
 
   const handleNodesChange = useCallback(
     (changes) => {
@@ -323,10 +309,16 @@ const handleConnect = useCallback(
     [onNodesChange, setNodes]
   );
 
-  /* ---------- Прочее ---------- */
+  /*  Прочее  */
 
   const handleAddRootPerson = () => {
-    setEditModalState({ isOpen: true, mode: 'add', personData: null, presetParentIds: null });
+    setEditModalState({ isOpen: true, mode: 'add', personData: null });
+  };
+
+  const handleAfterImport = (newTree) => {
+    setMenuOpen(false);
+    // Полный reload на новое дерево через URL
+    window.location.href = `/tree?tree_id=${newTree.id}`;
   };
 
   const isEmpty = !loading && nodes.length === 0;
@@ -335,37 +327,49 @@ const handleConnect = useCallback(
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-screen text-gray-500">
+      <div className="flex items-center justify-center h-screen bg-slate-50 dark:bg-slate-900 text-gray-500 dark:text-slate-400">
         Загрузка дерева...
       </div>
     );
   }
 
   return (
-    <div className="w-full h-screen bg-slate-50 relative">
+    <div className="w-full h-screen bg-slate-50 dark:bg-slate-900 relative transition-colors">
       <div className="absolute top-4 left-4 z-20 flex items-center gap-3">
+        {/* Кнопка возврата к списку деревьев */}
+        {onBack && (
+          <button
+            onClick={onBack}
+            className="flex items-center gap-2 bg-white dark:bg-slate-800 px-3 py-2 rounded-xl shadow-md border border-gray-200 dark:border-slate-700 text-xs font-semibold text-gray-700 dark:text-slate-200 hover:bg-gray-50 dark:hover:bg-slate-700 transition-colors"
+            title="К списку деревьев"
+          >
+            <ArrowLeft className="w-4 h-4 text-gray-600 dark:text-slate-400" />
+            Назад
+          </button>
+        )}
+
         <button
           onClick={() => setMenuOpen(true)}
-          className="flex items-center gap-2 bg-white px-3 py-2 rounded-xl shadow-md border border-gray-200 text-xs font-semibold text-gray-700 hover:bg-gray-50 transition-colors"
+          className="flex items-center gap-2 bg-white dark:bg-slate-800 px-3 py-2 rounded-xl shadow-md border border-gray-200 dark:border-slate-700 text-xs font-semibold text-gray-700 dark:text-slate-200 hover:bg-gray-50 dark:hover:bg-slate-700 transition-colors"
           title="Настройки дерева"
         >
-          <Menu className="w-4 h-4 text-gray-600" />
+          <Menu className="w-4 h-4 text-gray-600 dark:text-slate-300" />
           Меню
         </button>
 
         {showTopLeftAddButton && (
           <button
             onClick={handleAddRootPerson}
-            className="flex items-center gap-2 bg-white px-4 py-2 rounded-xl shadow-md border border-gray-200 text-xs font-semibold text-gray-700 hover:bg-gray-50 transition-colors"
+            className="flex items-center gap-2 bg-white dark:bg-slate-800 px-4 py-2 rounded-xl shadow-md border border-gray-200 dark:border-slate-700 text-xs font-semibold text-gray-700 dark:text-slate-200 hover:bg-gray-50 dark:hover:bg-slate-700 transition-colors"
           >
-            <UserPlus className="w-4 h-4 text-blue-600" />
+            <UserPlus className="w-4 h-4 text-blue-600 dark:text-blue-400" />
             Добавить человека
           </button>
         )}
       </div>
 
       {loadError && (
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-xs text-red-800 shadow">
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 rounded-xl border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950 px-4 py-2 text-xs text-red-800 dark:text-red-300 shadow">
           <AlertCircle className="w-4 h-4" />
           {loadError}
           <button onClick={fetchTree} className="ml-2 underline">Повторить</button>
@@ -404,14 +408,16 @@ const handleConnect = useCallback(
 
       {isEmpty && (
         <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
-          <div className="pointer-events-auto bg-white rounded-2xl shadow-xl border border-gray-200 p-8 max-w-sm text-center space-y-4">
-            <div className="w-16 h-16 mx-auto rounded-full bg-blue-50 flex items-center justify-center">
-              {canEdit ? <UserPlus className="w-8 h-8 text-blue-600" /> : <Lock className="w-8 h-8 text-amber-500" />}
+          <div className="pointer-events-auto bg-white dark:bg-slate-800 rounded-2xl shadow-xl border border-gray-200 dark:border-slate-700 p-8 max-w-sm text-center space-y-4">
+            <div className="w-16 h-16 mx-auto rounded-full bg-blue-50 dark:bg-blue-950 flex items-center justify-center">
+              {canEdit
+                ? <UserPlus className="w-8 h-8 text-blue-600 dark:text-blue-400" />
+                : <Lock className="w-8 h-8 text-amber-500 dark:text-amber-400" />}
             </div>
-            <h2 className="text-lg font-bold text-gray-800">
+            <h2 className="text-lg font-bold text-gray-800 dark:text-slate-100">
               {loadError ? 'Не удалось загрузить дерево' : 'Дерево пока пустое'}
             </h2>
-            <p className="text-sm text-gray-500">
+            <p className="text-sm text-gray-500 dark:text-slate-400">
               {canEdit
                 ? 'Создайте первую персону, чтобы начать строить дерево.'
                 : 'Войдите, чтобы добавить первых людей.'}
@@ -424,7 +430,9 @@ const handleConnect = useCallback(
                 <UserPlus className="w-4 h-4" /> Добавить человека
               </button>
             ) : (
-              <p className="text-xs text-gray-400">Авторизуйтесь через кнопку в правом верхнем углу</p>
+              <p className="text-xs text-gray-400 dark:text-slate-500">
+                Авторизуйтесь через кнопку в правом верхнем углу
+              </p>
             )}
           </div>
         </div>
@@ -444,6 +452,7 @@ const handleConnect = useCallback(
           isOpen={Boolean(viewPersonId)}
           onClose={() => setViewPersonId(null)}
           onRefresh={fetchTree}
+          treeId={graphMeta.tree_id}
           onAddConnection={(person) => {
             setViewPersonId(null);
             setConnectionSource(person);
@@ -456,7 +465,7 @@ const handleConnect = useCallback(
         mode={editModalState.mode}
         personData={editModalState.personData}
         treeId={graphMeta.tree_id}
-        onClose={() => setEditModalState((s) => ({ ...s, isOpen: false, presetParentIds: null }))}
+        onClose={() => setEditModalState((s) => ({ ...s, isOpen: false }))}
         onRefresh={fetchTree}
       />
 
@@ -486,6 +495,8 @@ const handleConnect = useCallback(
         onDirectionChange={handleDirectionChange}
         theme={theme}
         onThemeChange={handleThemeChange}
+        treeId={graphMeta.tree_id}
+        onAfterImport={handleAfterImport}
       />
     </div>
   );

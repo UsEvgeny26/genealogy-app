@@ -17,18 +17,18 @@ export const useDialog = () => {
 const VARIANT_STYLES = {
   default: {
     icon: Info,
-    iconBg: 'bg-blue-100 text-blue-600',
-    btn: 'bg-blue-600 hover:bg-blue-700',
+    iconBg: 'bg-blue-100 dark:bg-blue-900/50 text-blue-600 dark:text-blue-400',
+    btn: 'bg-blue-600 hover:bg-blue-700 text-white',
   },
   warning: {
     icon: AlertTriangle,
-    iconBg: 'bg-amber-100 text-amber-600',
-    btn: 'bg-amber-600 hover:bg-amber-700',
+    iconBg: 'bg-amber-100 dark:bg-amber-900/50 text-amber-600 dark:text-amber-400',
+    btn: 'bg-amber-600 hover:bg-amber-700 text-white',
   },
   danger: {
     icon: AlertCircle,
-    iconBg: 'bg-red-100 text-red-600',
-    btn: 'bg-red-600 hover:bg-red-700',
+    iconBg: 'bg-red-100 dark:bg-red-900/50 text-red-600 dark:text-red-400',
+    btn: 'bg-red-600 hover:bg-red-700 text-white',
   },
 };
 
@@ -98,21 +98,21 @@ function DialogView({ config, onClose }) {
 
   const handleSubmit = () => {
     if (config.type === 'prompt') onClose(value);
-    else if (config.type === 'choose') return; // у choose нет единой «submit», только кнопки действий
+    else if (config.type === 'choose') return;
     else onClose(true);
   };
 
-   return (
+  return (
     <div className="fixed inset-0 z-[100] bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+      <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden transition-colors">
         <div className="flex items-start gap-3 p-6">
           <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${variant.iconBg}`}>
             <Icon className="w-5 h-5" />
           </div>
           <div className="flex-1 min-w-0">
-            <h3 className="font-semibold text-gray-900">{config.title}</h3>
+            <h3 className="font-semibold text-gray-900 dark:text-slate-100">{config.title}</h3>
             {config.description && (
-              <p className="text-sm text-gray-600 mt-1 whitespace-pre-line">{config.description}</p>
+              <p className="text-sm text-gray-600 dark:text-slate-400 mt-1 whitespace-pre-line">{config.description}</p>
             )}
             {config.type === 'prompt' && (
               <input
@@ -121,20 +121,19 @@ function DialogView({ config, onClose }) {
                 onChange={(e) => setValue(e.target.value)}
                 placeholder={config.placeholder}
                 autoFocus
-                className="mt-3 w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                className="mt-3 w-full px-3 py-2 border rounded-lg text-sm bg-white dark:bg-slate-900 text-gray-800 dark:text-slate-100 border-gray-200 dark:border-slate-700 focus:ring-2 focus:ring-blue-500 outline-none"
               />
             )}
           </div>
           <button
             onClick={() => onClose(config.type === 'prompt' ? null : false)}
-            className="p-1 text-gray-400 hover:text-gray-600 rounded-lg"
+            className="p-1 text-gray-400 dark:text-slate-500 hover:text-gray-600 dark:hover:text-slate-300 rounded-lg"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* ⬇️ ВОТ ЭТОТ БЛОК ЗАМЕНЯЕТСЯ ⬇️ */}
-        <div className="flex justify-end gap-2 px-6 py-3 bg-gray-50/50 border-t border-gray-100 flex-wrap">
+        <div className="flex justify-end gap-2 px-6 py-3 bg-gray-50/50 dark:bg-slate-800/50 border-t border-gray-100 dark:border-slate-700 flex-wrap">
           {config.type === 'choose' ? (
             <>
               {(config.actions || []).map((a) => {
@@ -143,16 +142,15 @@ function DialogView({ config, onClose }) {
                   <button
                     key={a.value}
                     onClick={() => onClose(a.value)}
-                    className={`px-4 py-2 text-sm font-medium text-white rounded-lg transition-colors ${v.btn}`}
+                    className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${v.btn}`}
                   >
                     {a.label}
                   </button>
                 );
               })}
-
               <button
                 onClick={() => onClose(null)}
-                className="px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+                className="px-4 py-2 text-sm font-medium text-gray-600 dark:text-slate-300 hover:bg-gray-100 dark:hover:bg-slate-700 rounded-lg transition-colors"
               >
                 {config.cancelLabel || 'Отмена'}
               </button>
@@ -162,21 +160,20 @@ function DialogView({ config, onClose }) {
               {config.type !== 'alert' && (
                 <button
                   onClick={() => onClose(config.type === 'prompt' ? null : false)}
-                  className="px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+                  className="px-4 py-2 text-sm font-medium text-gray-600 dark:text-slate-300 hover:bg-gray-100 dark:hover:bg-slate-700 rounded-lg transition-colors"
                 >
                   {config.cancelLabel || 'Отмена'}
                 </button>
               )}
               <button
                 onClick={handleSubmit}
-                className={`px-4 py-2 text-sm font-medium text-white rounded-lg transition-colors ${variant.btn}`}
+                className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${variant.btn}`}
               >
                 {config.confirmLabel || 'OK'}
               </button>
             </>
           )}
         </div>
-        {/* ⬆️ КОНЕЦ БЛОКА ⬆️ */}
       </div>
     </div>
   );

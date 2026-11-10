@@ -1,24 +1,45 @@
-import hashlib
 from datetime import datetime
 from typing import List, Optional
+import uuid
+from pathlib import Path as FilePath
+import tempfile
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Response, status, File, UploadFile, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, select
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy import func, select, event
 from sqlalchemy.orm import Session, joinedload
+from fastapi.responses import PlainTextResponse
+from urllib.parse import quote
 
-from auth import get_current_user, require_user
+from gedcom_export import export_gedcom as export_gedcom_str
+from auth import (
+    clear_session_cookie,
+    create_session,
+    delete_session,
+    get_current_session_id,
+    get_current_user,
+    hash_password,
+    needs_rehash,
+    require_user,
+    set_session_cookie,
+    verify_password,
+)
 from database import engine, get_db
 from models import (
-    Association, Base, Family, FamilyChild, FamilyStatus,
-    Individual, Tree, User,
+    Association, AssociationType, Base,
+    Event, EventType,
+    Family, FamilyChild, FamilyStatus,
+    Individual, Place, Tree, User,
 )
 from schemas import (
     AssociationCreate, AssociationShort,
+    EventCreate, EventShort, EventUpdate,
     FamilyCreate, FamilyDetail, FamilyShort, FamilyUpdate,
     FamilyChildCreate, FamilyChildShort,
     IndividualCreate, IndividualDetail, IndividualShort, IndividualUpdate,
-    LoginRequest, TreeCreate, TreeListItem, TreeNode, TreeShort,
+    LoginRequest, PlaceShort,
+    TreeCreate, TreeListItem, TreeNode, TreeShort,
     TreeStats, TreeUpdate, TreeGraphResponse, TreeFamilyNode,
     TreeMarriageEdge, TreeChildEdge, TreeAssociationEdge,
     UserCreate, UserPublic, TreeOrphanParentEdge,
@@ -39,19 +60,44 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Uploads
+UPLOADS_DIR = FilePath("uploads")
+UPLOADS_DIR.mkdir(exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 
+ALLOWED_IMAGE_TYPES = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
+
+
+@app.post("/api/upload")
+async def upload_image(
+    file: UploadFile = File(...),
+    user: User = Depends(require_user),
+):
+    if not file.content_type or file.content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(400, detail="Допустимы только JPG, PNG, WebP, GIF")
+
+    content = await file.read()
+    if len(content) > MAX_IMAGE_SIZE:
+        raise HTTPException(400, detail="Файл больше 5 МБ")
+    if not content:
+        raise HTTPException(400, detail="Пустой файл")
+
+    ext = ALLOWED_IMAGE_TYPES[file.content_type]
+    filename = f"{uuid.uuid4().hex}{ext}"
+    target = UPLOADS_DIR / filename
+
+    with open(target, "wb") as f:
+        f.write(content)
+
+    return {"url": f"/uploads/{filename}"}
 
 # Утилиты
-
-def hash_password(password: str) -> str:
-    """Временный хеш. Заменить на bcrypt/argon2 на этапе 6."""
-    return "DEV:" + hashlib.sha256(password.encode()).hexdigest()
-
-
-def verify_password(password: str, hash_: str) -> bool:
-    return hash_password(password) == hash_
-
-
 def get_tree_or_403(tree_id: int, user: User, db: Session) -> Tree:
     tree = db.get(Tree, tree_id)
     if not tree:
@@ -83,10 +129,14 @@ def serialize_user(user: User) -> UserPublic:
         created_at=user.created_at,
     )
 
-# Auth
 
+# Auth
 @app.post("/api/auth/register", response_model=UserPublic, status_code=201)
-def register(data: UserCreate, db: Session = Depends(get_db)):
+def register(
+    data: UserCreate,
+    response: Response,
+    db: Session = Depends(get_db),
+):
     existing = db.scalar(select(User).where(User.email == data.email))
     if existing:
         raise HTTPException(status_code=400, detail="Этот email уже зарегистрирован")
@@ -100,25 +150,39 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
 
-    # Первое дерево для пользователя
     get_or_create_default_tree(user, db)
+
+    # Автологин после регистрации
+    session = create_session(user.id, db)
+    set_session_cookie(response, session.id)
 
     return serialize_user(user)
 
 
-@app.post("/api/auth/login")
-def login(data: LoginRequest, db: Session = Depends(get_db)):
+@app.post("/api/auth/login", response_model=UserPublic)
+def login(
+    data: LoginRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+):
     user = db.scalar(select(User).where(User.email == data.email))
-    if not user or not user.password_hash or not verify_password(data.password, user.password_hash):
+    if not user or not user.password_hash or not verify_password(
+        data.password, user.password_hash
+    ):
         raise HTTPException(status_code=401, detail="Неверный email или пароль")
+
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Пользователь деактивирован")
 
-    # Заглушка: токен = email. На этапе 6 вернём session-id.
-    return {
-        "token": user.email,
-        "user": serialize_user(user),
-    }
+    # Рехешируем legacy-пароль на bcrypt
+    if needs_rehash(user.password_hash):
+        user.password_hash = hash_password(data.password)
+        db.commit()
+
+    session = create_session(user.id, db)
+    set_session_cookie(response, session.id)
+
+    return serialize_user(user)
 
 
 @app.get("/api/auth/me", response_model=UserPublic)
@@ -127,9 +191,14 @@ def get_me(user: User = Depends(require_user)):
 
 
 @app.post("/api/auth/logout", status_code=204)
-def logout(user: User = Depends(require_user), db: Session = Depends(get_db)):
-    # Заглушка: на этапе 6 удалим session.
-    # Сейчас просто возвращаем 204 — фронт удалит токен из localStorage.
+def logout(
+    response: Response,
+    session_id: Optional[str] = Depends(get_current_session_id),
+    db: Session = Depends(get_db),
+):
+    if session_id:
+        delete_session(session_id, db)
+    clear_session_cookie(response)
     return None
 
 
@@ -345,22 +414,27 @@ def _build_graph(tree: Tree, can_edit: bool, db: Session) -> TreeGraphResponse:
 
 @app.get("/api/graph", response_model=TreeGraphResponse)
 def get_current_graph(
+    tree_id: Optional[int] = None, # <-- ДОБАВЛЕН ПАРАМЕТР
     user: Optional[User] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
     Универсальный эндпоинт для холста.
-    - Авторизован → его первое дерево, can_edit=true
-    - Гость → дерево demo-пользователя (email="demo@local"), can_edit=false
+    - Авторизован + передан tree_id → загружаем конкретное дерево.
+    - Авторизован без tree_id → его первое дерево.
+    - Гость → дерево demo-пользователя, can_edit=false.
     """
     if user:
-        tree = get_or_create_default_tree(user, db)
+        if tree_id is not None:
+            # get_tree_or_403 сам выдаст 404, если дерева нет, или 403, если оно чужое
+            tree = get_tree_or_403(tree_id, user, db)
+        else:
+            tree = get_or_create_default_tree(user, db)
         return _build_graph(tree, can_edit=True, db=db)
 
     # Гость — смотрим дерево demo
     demo = db.scalar(select(User).where(User.email == DEMO_EMAIL))
     if not demo:
-        # Демо-дерева нет → пустой граф
         return TreeGraphResponse(
             tree_id=0, tree_name="", owner_id=0, can_edit=False,
             persons=[], families=[],
@@ -477,6 +551,10 @@ def _individual_to_detail(ind: Individual, db: Session) -> IndividualDetail:
             _family_short_with_children(fam, children, live_person_ids)
         )
 
+    events = db.scalars(
+        select(Event).where(Event.individual_id == ind.id).order_by(Event.id)
+    ).all()
+
     return IndividualDetail(
         id=ind.id,
         tree_id=ind.tree_id,
@@ -502,6 +580,7 @@ def _individual_to_detail(ind: Individual, db: Session) -> IndividualDetail:
             for f in parent_families_filtered
         ],
         spouse_families=spouse_families_payload,
+        events=[_event_to_short(e) for e in events],
     )
 
 
@@ -622,9 +701,7 @@ def delete_individual(
     db.commit()
 
 
-# ---------------------------------------------------------------------------
 # Family CRUD
-# ---------------------------------------------------------------------------
 
 def get_family_or_403(family_id: int, user: User, db: Session) -> Family:
     fam = db.get(Family, family_id)
@@ -692,6 +769,202 @@ def _family_to_detail(fam: Family, db: Session) -> FamilyDetail:
             for l in links
         ],
     )
+
+
+# Утилиты для событий и мест
+def _get_or_create_place(tree_id: int, name: Optional[str], db: Session) -> Optional[int]:
+    """Возвращает id существующего Place или создаёт новый по имени. None если имя пустое."""
+    if not name:
+        return None
+    name = name.strip()
+    if not name:
+        return None
+
+    existing = db.scalar(
+        select(Place).where(Place.tree_id == tree_id, Place.name == name)
+    )
+    if existing:
+        return existing.id
+
+    place = Place(tree_id=tree_id, name=name)
+    db.add(place)
+    db.flush()
+    return place.id
+
+
+def _sync_individual_dates(ind: Individual, db: Session) -> None:
+    """
+    Пересчитывает денормализованные поля Individual (birth_date/birth_place/death_date/death_place/is_alive)
+    из событий BIRT и DEAT. Вызывать после создания/обновления/удаления такого события.
+    """
+    events = db.scalars(
+        select(Event).where(Event.individual_id == ind.id)
+    ).all()
+
+    birth = next((e for e in events if e.event_type == EventType.BIRTH), None)
+    death = next((e for e in events if e.event_type == EventType.DEATH), None)
+
+    ind.birth_date = birth.date_str if birth else None
+    ind.birth_place = birth.place.name if (birth and birth.place_id) else None
+    ind.death_date = death.date_str if death else None
+    ind.death_place = death.place.name if (death and death.place_id) else None
+    if death and death.date_str:
+        ind.is_alive = False
+
+# Events — CRUD
+def get_event_or_403(event_id: int, user: User, db: Session) -> Event:
+    event = db.get(Event, event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="Событие не найдено")
+    tree = db.get(Tree, event.tree_id)
+    if not tree or tree.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    return event
+
+
+def _event_to_short(event: Event) -> EventShort:
+    return EventShort(
+        id=event.id,
+        event_type=event.event_type,
+        date_str=event.date_str,
+        description=event.description,
+        individual_id=event.individual_id,
+        family_id=event.family_id,
+        place=PlaceShort.model_validate(event.place) if event.place else None,
+    )
+
+
+@app.post("/api/individuals/{individual_id}/events", response_model=EventShort, status_code=201)
+def create_individual_event(
+    individual_id: int,
+    data: EventCreate,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    ind = get_individual_or_403(individual_id, user, db)
+
+    if data.family_id is not None:
+        raise HTTPException(400, detail="Событие не может быть привязано и к персоне, и к семье")
+
+    place_id = data.place_id or _get_or_create_place(ind.tree_id, data.place_name, db)
+
+    event = Event(
+        tree_id=ind.tree_id,
+        individual_id=ind.id,
+        family_id=None,
+        event_type=data.event_type,
+        date_str=data.date_str,
+        place_id=place_id,
+        description=data.description,
+    )
+    db.add(event)
+    db.flush()
+
+    if event.event_type in (EventType.BIRTH, EventType.DEATH):
+        _sync_individual_dates(ind, db)
+
+    db.commit()
+    db.refresh(event)
+    return _event_to_short(event)
+
+
+@app.post("/api/families/{family_id}/events", response_model=EventShort, status_code=201)
+def create_family_event(
+    family_id: int,
+    data: EventCreate,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    fam = get_family_or_403(family_id, user, db)
+
+    if data.individual_id is not None:
+        raise HTTPException(400, detail="Событие не может быть привязано и к семье, и к персоне")
+
+    place_id = data.place_id or _get_or_create_place(fam.tree_id, data.place_name, db)
+
+    event = Event(
+        tree_id=fam.tree_id,
+        individual_id=None,
+        family_id=fam.id,
+        event_type=data.event_type,
+        date_str=data.date_str,
+        place_id=place_id,
+        description=data.description,
+    )
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+    return _event_to_short(event)
+
+
+@app.patch("/api/events/{event_id}", response_model=EventShort)
+def update_event(
+    event_id: int,
+    data: EventUpdate,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    event = get_event_or_403(event_id, user, db)
+    old_type = event.event_type
+    payload = data.model_dump(exclude_unset=True)
+
+    # place_name → place_id
+    if "place_name" in payload:
+        pn = payload.pop("place_name")
+        if pn is not None:
+            payload["place_id"] = _get_or_create_place(event.tree_id, pn, db)
+
+    for k, v in payload.items():
+        setattr(event, k, v)
+
+    db.flush()
+
+    # Если тип или дата события влияет на денормализацию персоны
+    if event.individual_id and (
+        old_type in (EventType.BIRTH, EventType.DEATH)
+        or event.event_type in (EventType.BIRTH, EventType.DEATH)
+    ):
+        ind = db.get(Individual, event.individual_id)
+        if ind:
+            _sync_individual_dates(ind, db)
+
+    db.commit()
+    db.refresh(event)
+    return _event_to_short(event)
+
+
+@app.delete("/api/events/{event_id}", status_code=204)
+def delete_event(
+    event_id: int,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    event = get_event_or_403(event_id, user, db)
+    ind_id = event.individual_id
+    was_birth_or_death = event.event_type in (EventType.BIRTH, EventType.DEATH)
+
+    db.delete(event)
+    db.flush()
+
+    if ind_id and was_birth_or_death:
+        ind = db.get(Individual, ind_id)
+        if ind:
+            _sync_individual_dates(ind, db)
+
+    db.commit()
+
+# Places
+@app.get("/api/trees/{tree_id}/places", response_model=List[PlaceShort])
+def list_places(
+    tree_id: int,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    get_tree_or_403(tree_id, user, db)
+    places = db.scalars(
+        select(Place).where(Place.tree_id == tree_id).order_by(Place.name)
+    ).all()
+    return [PlaceShort.model_validate(p) for p in places]
 
 
 @app.post("/api/trees/{tree_id}/families", response_model=FamilyDetail, status_code=201)
@@ -891,3 +1164,146 @@ def delete_association(
         raise HTTPException(status_code=403, detail="Нет доступа")
     db.delete(assoc)
     db.commit()
+
+
+# Экспорт GEDCOM
+@app.get("/api/trees/{tree_id}/export-gedcom")
+def export_gedcom_endpoint(
+    tree_id: int,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    tree = get_tree_or_403(tree_id, user, db)
+
+    individuals = db.scalars(
+        select(Individual)
+        .where(Individual.tree_id == tree.id, Individual.deleted_at.is_(None))
+        .order_by(Individual.id)
+    ).all()
+
+    families = db.scalars(
+        select(Family)
+        .where(Family.tree_id == tree.id, Family.deleted_at.is_(None))
+        .order_by(Family.id)
+    ).all()
+
+    family_ids = [f.id for f in families]
+    family_children = (
+        db.scalars(
+            select(FamilyChild).where(FamilyChild.family_id.in_(family_ids))
+        ).all()
+        if family_ids
+        else []
+    )
+
+    events = db.scalars(
+        select(Event).where(Event.tree_id == tree.id).order_by(Event.id)
+    ).all()
+
+    content = export_gedcom_str(tree, individuals, families, family_children, events)
+
+    safe_name = (
+            "".join(
+                c if c.isalnum() or c in "-_ " else "_"
+                for c in (tree.name or "tree")
+            ).strip()
+            or "tree"
+    )
+    ascii_fallback = "tree.ged"
+    utf8_name = quote(f"{safe_name}.ged")
+
+    return PlainTextResponse(
+        content=content,
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=\"{ascii_fallback}\"; "
+                f"filename*=UTF-8''{utf8_name}"
+            ),
+        },
+    )
+# Импорт GEDCOM
+@app.post("/api/trees/import-gedcom", response_model=TreeShort, status_code=201)
+async def import_gedcom_endpoint(
+    file: UploadFile = File(...),
+    tree_name: Optional[str] = Form(None),
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Импортирует .ged в новое дерево пользователя.
+    Возвращает созданное дерево.
+    """
+    if not file.filename:
+        raise HTTPException(400, detail="Файл не выбран")
+
+    if not file.filename.lower().endswith((".ged", ".txt")):
+        raise HTTPException(400, detail="Поддерживаются только файлы .ged или .txt")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, detail="Файл пустой")
+
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(400, detail="Файл слишком большой (макс 20 МБ)")
+
+    # Кладём во временный файл — ged4py хочет path
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", suffix=".ged", delete=False
+        ) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        name = (
+            tree_name
+            or (file.filename and FilePath(file.filename).stem)
+            or "Импортированное дерево"
+        )
+        tree = Tree(owner_id=user.id, name=name)
+        db.add(tree)
+        db.flush()
+
+        from gedcom_import import import_gedcom as _import_ged
+
+        try:
+            counts = _import_ged(tmp_path, tree.id, db)
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(400, detail=f"Ошибка импорта: {e}")
+
+        db.commit()
+        db.refresh(tree)
+        print(f"[import-gedcom] tree={tree.id} {counts}")
+        return tree
+
+    finally:
+        if tmp_path:
+            try:
+                FilePath(tmp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+# Автоматическое обновление Tree.updated_at при любых изменениях внутри дерева
+@event.listens_for(Session, "before_flush")
+def update_tree_timestamp(session, flush_context, instances):
+    from models import Individual, Family, Event, Association
+    touched_tree_ids = set()
+
+    for obj in session.new.union(session.dirty).union(session.deleted):
+        if isinstance(obj, (Individual, Family, Event, Association)) and hasattr(obj, 'tree_id') and obj.tree_id:
+            touched_tree_ids.add(obj.tree_id)
+
+    if touched_tree_ids:
+        from sqlalchemy import update
+        from models import Tree
+
+        # Принудительно обновляем прямо в базе через update()
+        for tree_id in touched_tree_ids:
+            session.execute(
+                update(Tree)
+                .where(Tree.id == tree_id)
+                .values(updated_at=datetime.utcnow())
+            )

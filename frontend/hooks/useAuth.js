@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { apiFetch, setAuthToken, clearAuthToken, getAuthToken } from '@/lib/api';
+import { apiFetch } from '@/lib/api';
 
 export function useAuth() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -11,24 +11,18 @@ export function useAuth() {
   const checkAuth = useCallback(async () => {
     setIsLoading(true);
     try {
-      const token = getAuthToken();
-      if (!token) {
-        setIsLoggedIn(false);
-        setUser(null);
-        return;
-      }
       const res = await apiFetch('/api/auth/me');
       if (res.ok) {
         const data = await res.json();
         setUser(data);
         setIsLoggedIn(true);
       } else {
-        setIsLoggedIn(false);
         setUser(null);
+        setIsLoggedIn(false);
       }
     } catch {
-      setIsLoggedIn(false);
       setUser(null);
+      setIsLoggedIn(false);
     } finally {
       setIsLoading(false);
     }
@@ -48,23 +42,47 @@ export function useAuth() {
       throw new Error(err.detail || 'Неверный email или пароль');
     }
     const data = await res.json();
-    // token = email (текущая заглушка бэка)
-    setAuthToken(data.token);
-    setUser(data.user);
+    setUser(data);
     setIsLoggedIn(true);
-    return data.user;
+    return data;
+  }, []);
+
+  const register = useCallback(async (email, password, displayName) => {
+    const res = await apiFetch('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({
+        email,
+        password,
+        display_name: displayName || undefined,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Не удалось зарегистрироваться');
+    }
+    const data = await res.json();
+    setUser(data);
+    setIsLoggedIn(true);
+    return data;
   }, []);
 
   const logout = useCallback(async () => {
     try {
       await apiFetch('/api/auth/logout', { method: 'POST' });
     } catch {
-      /* игнорируем */
+      /* ignore */
     }
-    clearAuthToken();
-    setIsLoggedIn(false);
     setUser(null);
+    setIsLoggedIn(false);
   }, []);
 
-  return { isLoggedIn, isLoading, user, login, logout, refresh: checkAuth };
+  return {
+    isLoggedIn,
+    isLoading,
+    user,
+    login,
+    register,
+    logout,
+    refresh: checkAuth,
+  };
 }

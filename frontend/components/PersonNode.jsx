@@ -3,34 +3,12 @@
 import React from 'react';
 import { Handle, Position } from '@xyflow/react';
 import { User, Pencil, Link as LinkIcon, Trash2 } from 'lucide-react';
-import { formatDateRu } from '@/lib/format';
 
-// Позиции handles по направлению layout
 const HANDLE_POSITIONS = {
-  TB: {
-    flowSource: Position.Bottom,
-    flowTarget: Position.Top,
-    perpSource: Position.Right,
-    perpTarget: Position.Left,
-  },
-  BT: {
-    flowSource: Position.Top,
-    flowTarget: Position.Bottom,
-    perpSource: Position.Right,
-    perpTarget: Position.Left,
-  },
-  LR: {
-    flowSource: Position.Right,
-    flowTarget: Position.Left,
-    perpSource: Position.Bottom,
-    perpTarget: Position.Top,
-  },
-  RL: {
-    flowSource: Position.Left,
-    flowTarget: Position.Right,
-    perpSource: Position.Bottom,
-    perpTarget: Position.Top,
-  },
+  TB: { flowSource: Position.Bottom, flowTarget: Position.Top, perpSource: Position.Right, perpTarget: Position.Left },
+  BT: { flowSource: Position.Top, flowTarget: Position.Bottom, perpSource: Position.Right, perpTarget: Position.Left },
+  LR: { flowSource: Position.Right, flowTarget: Position.Left, perpSource: Position.Bottom, perpTarget: Position.Top },
+  RL: { flowSource: Position.Left, flowTarget: Position.Right, perpSource: Position.Bottom, perpTarget: Position.Top },
 };
 
 export const PersonNode = ({ data }) => {
@@ -40,89 +18,51 @@ export const PersonNode = ({ data }) => {
   const direction = data.layoutDirection || 'TB';
   const positions = HANDLE_POSITIONS[direction] || HANDLE_POSITIONS.TB;
 
-  const borderClass = isMale
-    ? 'border-blue-400'
-    : isFemale
-      ? 'border-pink-400'
-      : 'border-gray-400';
+  const borderClass = isMale ? 'border-blue-400 dark:border-blue-500'
+    : isFemale ? 'border-pink-400 dark:border-pink-500'
+    : 'border-gray-400 dark:border-slate-500';
 
-  const avatarClass = isMale
-    ? 'bg-blue-500'
-    : isFemale
-      ? 'bg-pink-500'
-      : 'bg-gray-500';
+  const avatarClass = isMale ? 'bg-blue-500'
+    : isFemale ? 'bg-pink-500'
+    : 'bg-gray-500';
 
   const showDeathRow = data.is_alive === false;
 
-  // Видимая ручка — только для авторизованных
   const visibleHandle = canEdit
-    ? '!w-3 !h-3 !bg-gray-400 !border-2 !border-white !opacity-40 hover:!opacity-100 hover:!bg-blue-500 hover:!w-4 hover:!h-4 transition-all duration-150'
+    ? '!w-3 !h-3 !bg-gray-400 !border-2 !border-white dark:!border-slate-800 !opacity-40 hover:!opacity-100 hover:!bg-blue-500 hover:!w-4 hover:!h-4 transition-all duration-150'
     : '!w-1 !h-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none';
 
-  // Невидимая — всегда, чтобы рёбра находили якорь
   const hiddenHandle = '!w-1 !h-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none';
 
   return (
     <div
-      className={`group relative px-4 py-3 shadow-md rounded-xl bg-white border-2 min-w-[190px] max-w-[220px] cursor-pointer transition-all hover:shadow-lg ${borderClass}`}
+      className={`group relative px-4 py-3 shadow-md rounded-xl bg-white dark:bg-slate-800 border-2 min-w-[190px] max-w-[220px] cursor-pointer transition-all hover:shadow-lg ${borderClass}`}
     >
-      {/* Flow-ось: по ней тянется создание связи родитель-ребёнок */}
-      <Handle
-        id="flow-source"
-        type="source"
-        position={positions.flowSource}
-        className={visibleHandle}
-      />
-      <Handle
-        id="flow-target"
-        type="target"
-        position={positions.flowTarget}
-        className={visibleHandle}
-      />
-
-      {/* Перпендикулярная ось: супруги (брак) */}
-      <Handle
-        id="perp-source"
-        type="source"
-        position={positions.perpSource}
-        className={hiddenHandle}
-      />
-      <Handle
-        id="perp-target"
-        type="target"
-        position={positions.perpTarget}
-        className={hiddenHandle}
-      />
+      <Handle id="flow-source" type="source" position={positions.flowSource} className={visibleHandle} />
+      <Handle id="flow-target" type="target" position={positions.flowTarget} className={visibleHandle} />
+      <Handle id="perp-source" type="source" position={positions.perpSource} className={hiddenHandle} />
+      <Handle id="perp-target" type="target" position={positions.perpTarget} className={hiddenHandle} />
 
       {canEdit && (
-        <div className="absolute -top-3 right-2 flex gap-1 bg-white shadow-sm border border-gray-200 rounded-lg p-1 opacity-90 group-hover:opacity-100 transition-opacity z-10">
+        <div className="absolute -top-3 right-2 flex gap-1 bg-white dark:bg-slate-800 shadow-sm border border-gray-200 dark:border-slate-700 rounded-lg p-1 opacity-90 group-hover:opacity-100 transition-opacity z-10">
           <button
-            onClick={(e) => {
-              e.stopPropagation();
-              data.onEdit();
-            }}
+            onClick={(e) => { e.stopPropagation(); data.onEdit(); }}
             title="Редактировать"
-            className="p-1 text-gray-600 hover:text-blue-600 hover:bg-gray-100 rounded"
+            className="p-1 text-gray-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-gray-100 dark:hover:bg-slate-700 rounded"
           >
             <Pencil className="w-3.5 h-3.5" />
           </button>
           <button
-            onClick={(e) => {
-              e.stopPropagation();
-              data.onAddConnection();
-            }}
+            onClick={(e) => { e.stopPropagation(); data.onAddConnection(); }}
             title="Добавить связь"
-            className="p-1 text-gray-600 hover:text-green-600 hover:bg-gray-100 rounded"
+            className="p-1 text-gray-600 dark:text-slate-300 hover:text-green-600 dark:hover:text-green-400 hover:bg-gray-100 dark:hover:bg-slate-700 rounded"
           >
             <LinkIcon className="w-3.5 h-3.5" />
           </button>
           <button
-            onClick={(e) => {
-              e.stopPropagation();
-              data.onDelete();
-            }}
+            onClick={(e) => { e.stopPropagation(); data.onDelete(); }}
             title="Удалить"
-            className="p-1 text-gray-600 hover:text-red-600 hover:bg-gray-100 rounded"
+            className="p-1 text-gray-600 dark:text-slate-300 hover:text-red-600 dark:hover:text-red-400 hover:bg-gray-100 dark:hover:bg-slate-700 rounded"
           >
             <Trash2 className="w-3.5 h-3.5" />
           </button>
@@ -130,9 +70,7 @@ export const PersonNode = ({ data }) => {
       )}
 
       <div className="flex items-center gap-3">
-        <div
-          className={`w-10 h-10 rounded-full flex items-center justify-center text-white shrink-0 ${avatarClass}`}
-        >
+        <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white shrink-0 ${avatarClass}`}>
           {data.photo_url ? (
             <img src={data.photo_url} alt="" className="w-full h-full rounded-full object-cover" />
           ) : (
@@ -141,14 +79,14 @@ export const PersonNode = ({ data }) => {
         </div>
         <div className="min-w-0">
           <div
-            className="font-semibold text-gray-800 text-sm leading-tight truncate"
+            className="font-semibold text-gray-800 dark:text-slate-100 text-sm leading-tight truncate"
             title={`${data.first_name || ''} ${data.last_name || ''}`.trim()}
           >
             {data.first_name} {data.last_name || ''}
           </div>
           {(data.birth_date || showDeathRow) && (
-            <div className="text-[11px] text-gray-500 mt-0.5 truncate">
-              {formatDateRu(data.birth_date) || '—'}
+            <div className="text-[11px] text-gray-500 dark:text-slate-400 mt-0.5 truncate">
+              {data.birth_date || '—'}
               {showDeathRow ? ' †' : ''}
             </div>
           )}

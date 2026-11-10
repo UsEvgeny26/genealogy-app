@@ -84,7 +84,7 @@ export const RelationEdge = ({
               type="button"
               onClick={handleDelete}
               onMouseDown={(e) => e.stopPropagation()}
-              className="w-6 h-6 flex items-center justify-center rounded-full bg-white border-2 border-blue-500 text-blue-600 hover:bg-blue-500 hover:text-white shadow-md transition-colors"
+              className="w-6 h-6 flex items-center justify-center rounded-full bg-white dark:bg-slate-800 border-2 border-blue-500 text-blue-600 dark:text-blue-400 hover:bg-blue-500 dark:hover:bg-blue-600 hover:text-white shadow-md transition-colors"
               title="Удалить связь"
             >
               <X className="w-3.5 h-3.5" />

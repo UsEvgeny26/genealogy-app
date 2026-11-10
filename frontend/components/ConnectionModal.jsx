@@ -45,40 +45,19 @@ export const ConnectionModal = ({
   const actions = useRelationActions();
   const dialog = useDialog();
 
-  // --- Режимы ---
-  // family mode: drag persona ↔ family node
   const isFamilyMode = presetFamilyId != null && presetFamilyId !== undefined;
-
-  // drag mode: drag persona ↔ persona
-  const isDragMode =
-    !isFamilyMode && presetSourceId != null && presetTargetId != null;
-
-  // button mode: open from Link button, нужно выбрать человека вручную
+  const isDragMode = !isFamilyMode && presetSourceId != null && presetTargetId != null;
   const isButtonMode = !isFamilyMode && !isDragMode;
 
-  // --- source / target ---
-  // В drag-режиме source = presetSourceId (я), target = presetTargetId
-  // В button-режиме source = sourcePerson.id, target = выбранный
-  // В family-режиме childId = presetSourceId ?? presetTargetId (персона-ребёнок)
-  const sourceId = isFamilyMode
-    ? null
-    : isDragMode
-      ? Number(presetSourceId)
-      : sourcePerson?.id ?? null;
-
+  const sourceId = isFamilyMode ? null : isDragMode ? Number(presetSourceId) : sourcePerson?.id ?? null;
   const targetIdResolved = isDragMode ? Number(presetTargetId) : null;
-
   const familyId = isFamilyMode ? Number(presetFamilyId) : null;
-  const childIdInFamily = isFamilyMode
-    ? Number(presetSourceId ?? presetTargetId)
-    : null;
+  const childIdInFamily = isFamilyMode ? Number(presetSourceId ?? presetTargetId) : null;
 
   const source = useMemo(() => {
     if (isFamilyMode) return null;
     const sid = Number(sourceId);
-    return (
-      allPersons.find((p) => Number(p.id) === sid) || sourcePerson || null
-    );
+    return allPersons.find((p) => Number(p.id) === sid) || sourcePerson || null;
   }, [allPersons, sourceId, sourcePerson, isFamilyMode]);
 
   const target = useMemo(() => {
@@ -98,7 +77,6 @@ export const ConnectionModal = ({
     return allPersons.find((p) => Number(p.id) === cid) || null;
   }, [allPersons, childIdInFamily, isFamilyMode]);
 
-  // --- Кандидаты (только в button-режиме) ---
   const candidates = useMemo(() => {
     if (!isButtonMode || !source) return [];
     const sid = Number(source.id);
@@ -108,7 +86,6 @@ export const ConnectionModal = ({
     return list.filter((p) => fullName(p).toLowerCase().includes(q));
   }, [allPersons, source, search, isButtonMode]);
 
-  // --- Сброс при открытии ---
   useEffect(() => {
     if (isOpen) {
       setRelationType(null);
@@ -124,8 +101,6 @@ export const ConnectionModal = ({
 
   const finalTargetId = isDragMode ? targetIdResolved : targetId;
 
-  /* ---------- Обработчик ---------- */
-
   const handleSubmit = async () => {
     if (!relationType) return;
     if (!isFamilyMode && !finalTargetId) return;
@@ -135,86 +110,23 @@ export const ConnectionModal = ({
 
     try {
       if (isFamilyMode) {
-        // persona → family
         await actions.addChildToFamily({
           family_id: familyId,
           child_id: childIdInFamily,
           relationship_type: relationType,
         });
       } else {
-        // persona → persona
         const srcId = Number(sourceId);
         const tgtId = Number(finalTargetId);
 
         switch (relationType) {
-          case 'spouse':
-            await actions.connectSpouses({
-              treeId,
-              aId: srcId,
-              bId: tgtId,
-              families: allFamilies,
-            });
-            break;
-
-          case 'parent':
-            await actions.connectParentChild({
-              treeId,
-              parentId: srcId,
-              childId: tgtId,
-              relationshipType: 'biological',
-              families: allFamilies,
-              childEdges: allChildEdges,
-            });
-            break;
-
-          case 'child':
-            await actions.connectParentChild({
-              treeId,
-              parentId: tgtId,
-              childId: srcId,
-              relationshipType: 'biological',
-              families: allFamilies,
-              childEdges: allChildEdges,
-            });
-            break;
-
-          case 'adoptive_parent':
-            await actions.connectParentChild({
-              treeId,
-              parentId: srcId,
-              childId: tgtId,
-              relationshipType: 'adoptive',
-              families: allFamilies,
-              childEdges: allChildEdges,
-            });
-            break;
-
-          case 'adoptive_child':
-            await actions.connectParentChild({
-              treeId,
-              parentId: tgtId,
-              childId: srcId,
-              relationshipType: 'adoptive',
-              families: allFamilies,
-              childEdges: allChildEdges,
-            });
-            break;
-
-          case 'godparent':
-            await actions.createAssociation(treeId, {
-              type: 'godparent',
-              from_id: srcId,
-              to_id: tgtId,
-            });
-            break;
-
-          case 'godchild':
-            await actions.createAssociation(treeId, {
-              type: 'godparent',
-              from_id: tgtId,
-              to_id: srcId,
-            });
-            break;
+          case 'spouse': await actions.connectSpouses({ treeId, aId: srcId, bId: tgtId, families: allFamilies }); break;
+          case 'parent': await actions.connectParentChild({ treeId, parentId: srcId, childId: tgtId, relationshipType: 'biological', families: allFamilies, childEdges: allChildEdges }); break;
+          case 'child': await actions.connectParentChild({ treeId, parentId: tgtId, childId: srcId, relationshipType: 'biological', families: allFamilies, childEdges: allChildEdges }); break;
+          case 'adoptive_parent': await actions.connectParentChild({ treeId, parentId: srcId, childId: tgtId, relationshipType: 'adoptive', families: allFamilies, childEdges: allChildEdges }); break;
+          case 'adoptive_child': await actions.connectParentChild({ treeId, parentId: tgtId, childId: srcId, relationshipType: 'adoptive', families: allFamilies, childEdges: allChildEdges }); break;
+          case 'godparent': await actions.createAssociation(treeId, { type: 'godparent', from_id: srcId, to_id: tgtId }); break;
+          case 'godchild': await actions.createAssociation(treeId, { type: 'godparent', from_id: tgtId, to_id: srcId }); break;
         }
       }
 
@@ -227,78 +139,52 @@ export const ConnectionModal = ({
     }
   };
 
-  /* ---------- Заголовки ---------- */
-
-  const modalTitle = isFamilyMode
-    ? 'Ребёнок для семьи'
-    : isDragMode
-      ? 'Новая связь'
-      : 'Новая связь';
-
+  const modalTitle = isFamilyMode ? 'Ребёнок для семьи' : 'Новая связь';
   const options = isFamilyMode ? RELATION_OPTIONS_FAMILY : RELATION_OPTIONS_PERSONA;
-
-  /* ---------- Рендер ---------- */
 
   return (
     <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] flex flex-col overflow-hidden">
-        <div className="flex justify-between items-center px-6 py-4 border-b border-gray-100">
-          <h3 className="font-semibold text-lg text-gray-800">{modalTitle}</h3>
-          <button
-            onClick={onClose}
-            className="p-1 text-gray-400 hover:text-gray-600 rounded-lg"
-          >
+      <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] flex flex-col overflow-hidden transition-colors">
+        <div className="flex justify-between items-center px-6 py-4 border-b border-gray-100 dark:border-slate-700">
+          <h3 className="font-semibold text-lg text-gray-800 dark:text-slate-100">{modalTitle}</h3>
+          <button onClick={onClose} className="p-1 text-gray-400 dark:text-slate-500 hover:text-gray-600 dark:hover:text-slate-300 rounded-lg">
             <X className="w-5 h-5" />
           </button>
         </div>
 
         <div className="p-6 space-y-5 overflow-y-auto">
-          {/* Кто с кем */}
           {isFamilyMode && childInFamily && (
-            <div className="flex items-center gap-2 text-sm bg-slate-50 rounded-xl p-3 min-h-[52px]">
-              <span className="font-semibold text-gray-800 truncate">
-                {fullName(childInFamily)}
-              </span>
-              <ArrowRight className="w-4 h-4 text-gray-400 shrink-0" />
-              <span className="text-gray-600">Семья #{familyId}</span>
+            <div className="flex items-center gap-2 text-sm bg-slate-50 dark:bg-slate-900/50 rounded-xl p-3 min-h-[52px]">
+              <span className="font-semibold text-gray-800 dark:text-slate-200 truncate">{fullName(childInFamily)}</span>
+              <ArrowRight className="w-4 h-4 text-gray-400 dark:text-slate-500 shrink-0" />
+              <span className="text-gray-600 dark:text-slate-400">Семья #{familyId}</span>
             </div>
           )}
 
           {isDragMode && target && source && (
-            <div className="flex items-center gap-2 text-sm bg-slate-50 rounded-xl p-3 min-h-[52px]">
-              <span className="font-semibold text-gray-800 truncate">
-                {fullName(source)}
-              </span>
-              <ArrowRight className="w-4 h-4 text-gray-400 shrink-0" />
-              <span className="font-semibold text-gray-800 truncate">
-                {fullName(target)}
-              </span>
+            <div className="flex items-center gap-2 text-sm bg-slate-50 dark:bg-slate-900/50 rounded-xl p-3 min-h-[52px]">
+              <span className="font-semibold text-gray-800 dark:text-slate-200 truncate">{fullName(source)}</span>
+              <ArrowRight className="w-4 h-4 text-gray-400 dark:text-slate-500 shrink-0" />
+              <span className="font-semibold text-gray-800 dark:text-slate-200 truncate">{fullName(target)}</span>
             </div>
           )}
 
           {isButtonMode && source && (
-            <div className="flex items-center gap-2 text-sm bg-slate-50 rounded-xl p-3 min-h-[52px]">
-              <span className="font-semibold text-gray-800 truncate">
-                {fullName(source)}
-              </span>
-              <ArrowRight className="w-4 h-4 text-gray-400 shrink-0" />
+            <div className="flex items-center gap-2 text-sm bg-slate-50 dark:bg-slate-900/50 rounded-xl p-3 min-h-[52px]">
+              <span className="font-semibold text-gray-800 dark:text-slate-200 truncate">{fullName(source)}</span>
+              <ArrowRight className="w-4 h-4 text-gray-400 dark:text-slate-500 shrink-0" />
               {targetId ? (
-                <span className="font-semibold text-gray-800 truncate">
-                  {fullName(
-                    allPersons.find((p) => String(p.id) === String(targetId))
-                  )}
+                <span className="font-semibold text-gray-800 dark:text-slate-200 truncate">
+                  {fullName(allPersons.find((p) => String(p.id) === String(targetId)))}
                 </span>
               ) : (
-                <span className="text-gray-400 italic">
-                  выберите человека ниже
-                </span>
+                <span className="text-gray-400 dark:text-slate-500 italic">выберите человека ниже</span>
               )}
             </div>
           )}
 
-          {/* Тип связи */}
           <div>
-            <label className="block text-xs font-semibold text-gray-600 mb-2">
+            <label className="block text-xs font-semibold text-gray-600 dark:text-slate-400 mb-2">
               {isFamilyMode ? 'Тип связи' : 'Кем являюсь я по отношению к другому?'}
             </label>
             <div className="grid grid-cols-2 gap-2">
@@ -309,58 +195,46 @@ export const ConnectionModal = ({
                   onClick={() => setRelationType(opt.id)}
                   className={`flex items-start gap-2 px-3 py-2 rounded-lg border-2 text-xs font-medium transition-colors text-left ${
                     relationType === opt.id
-                      ? 'border-blue-500 bg-blue-50'
-                      : 'border-gray-200 hover:border-gray-300'
+                      ? 'border-blue-500 bg-blue-50 dark:bg-blue-950 text-gray-900 dark:text-slate-100'
+                      : 'border-gray-200 dark:border-slate-700 hover:border-gray-300 dark:hover:border-slate-600 text-gray-700 dark:text-slate-300'
                   }`}
                 >
-                  <span
-                    className="w-3 h-3 rounded-full shrink-0 mt-0.5"
-                    style={{ background: opt.color }}
-                  />
+                  <span className="w-3 h-3 rounded-full shrink-0 mt-0.5" style={{ background: opt.color }} />
                   <span className="flex-1 min-w-0">
                     <span className="block">{opt.label}</span>
-                    {opt.hint && (
-                      <span className="block text-[10px] text-gray-400 font-normal mt-0.5">
-                        {opt.hint}
-                      </span>
-                    )}
+                    {opt.hint && <span className="block text-[10px] text-gray-400 dark:text-slate-500 font-normal mt-0.5">{opt.hint}</span>}
                   </span>
                 </button>
               ))}
             </div>
           </div>
 
-          {/* Выбор человека — только в button-режиме */}
           {isButtonMode && (
             <div>
-              <label className="block text-xs font-semibold text-gray-600 mb-2">
-                Кто?
-              </label>
+              <label className="block text-xs font-semibold text-gray-600 dark:text-slate-400 mb-2">Кто?</label>
               <div className="relative mb-2">
-                <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 dark:text-slate-500" />
                 <input
                   type="text"
                   placeholder="Поиск..."
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  className="w-full pl-9 pr-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                  className="w-full pl-9 pr-3 py-2 border rounded-lg text-sm bg-white dark:bg-slate-900 text-gray-800 dark:text-slate-100 border-gray-200 dark:border-slate-700 focus:ring-2 focus:ring-blue-500 outline-none"
                 />
               </div>
-              <div className="max-h-56 overflow-y-auto border border-gray-200 rounded-lg">
+              <div className="max-h-56 overflow-y-auto border border-gray-200 dark:border-slate-700 rounded-lg">
                 {candidates.length === 0 ? (
-                  <div className="p-3 text-xs text-gray-400 text-center">
-                    Никого не найдено
-                  </div>
+                  <div className="p-3 text-xs text-gray-400 dark:text-slate-500 text-center">Никого не найдено</div>
                 ) : (
                   candidates.map((p) => (
                     <button
                       key={p.id}
                       type="button"
                       onClick={() => setTargetId(p.id)}
-                      className={`w-full text-left px-3 py-2 text-sm border-b border-gray-100 last:border-b-0 transition-colors ${
+                      className={`w-full text-left px-3 py-2 text-sm border-b border-gray-100 dark:border-slate-700 last:border-b-0 transition-colors ${
                         String(targetId) === String(p.id)
-                          ? 'bg-blue-50 text-blue-800'
-                          : 'hover:bg-gray-50'
+                          ? 'bg-blue-50 dark:bg-blue-950 text-blue-800 dark:text-blue-300'
+                          : 'text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-700'
                       }`}
                     >
                       {fullName(p)}
@@ -372,30 +246,21 @@ export const ConnectionModal = ({
           )}
 
           {error && (
-            <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-800">
+            <div className="flex items-start gap-2 rounded-lg border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950 p-2 text-xs text-red-800 dark:text-red-300">
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
               <span>{error}</span>
             </div>
           )}
         </div>
 
-        <div className="flex justify-end gap-3 px-6 py-4 border-t border-gray-100 bg-gray-50/50">
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={busy}
-            className="px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100 rounded-lg disabled:opacity-50"
-          >
+        <div className="flex justify-end gap-3 px-6 py-4 border-t border-gray-100 dark:border-slate-700 bg-gray-50/50 dark:bg-slate-800/50">
+          <button type="button" onClick={onClose} disabled={busy} className="px-4 py-2 text-sm font-medium text-gray-600 dark:text-slate-300 hover:bg-gray-100 dark:hover:bg-slate-700 rounded-lg disabled:opacity-50">
             Отмена
           </button>
           <button
             type="button"
             onClick={handleSubmit}
-            disabled={
-              !relationType ||
-              (!isFamilyMode && !finalTargetId) ||
-              busy
-            }
+            disabled={!relationType || (!isFamilyMode && !finalTargetId) || busy}
             className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {busy && <Loader2 className="w-4 h-4 animate-spin" />}

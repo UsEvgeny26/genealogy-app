@@ -1,2 +1,44 @@
 @import '@xyflow/react/dist/style.css';
 @import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --bg-app: #f8fafc;
+  --bg-surface: #ffffff;
+  --bg-surface-muted: #f1f5f9;
+  --text-primary: #1f2937;
+  --text-secondary: #6b7280;
+  --text-muted: #9ca3af;
+  --border-default: #e5e7eb;
+  --border-muted: #f3f4f6;
+}
+
+.dark {
+  --bg-app: #0f172a;
+  --bg-surface: #1e293b;
+  --bg-surface-muted: #334155;
+  --text-primary: #f1f5f9;
+  --text-secondary: #cbd5e1;
+  --text-muted: #94a3b8;
+  --border-default: #334155;
+  --border-muted: #1e293b;
+}
+
+body {
+  background: var(--bg-app);
+  color: var(--text-primary);
+}
+
+/* React Flow — тёмный фон в dark */
+.dark .react-flow {
+  background: var(--bg-app);
+}
+.dark .react-flow__controls button {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border-color: var(--border-default);
+}
+.dark .react-flow__controls button:hover {
+  background: var(--bg-surface-muted);
+}

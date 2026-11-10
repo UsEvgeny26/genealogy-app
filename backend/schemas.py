@@ -139,6 +139,7 @@ class IndividualDetail(IndividualBase, ORMModel):
     # Краткие сведения о семьях
     parent_families: List["FamilyShort"] = []
     spouse_families: List["FamilyShort"] = []
+    events: List["EventShort"] = []
 
 
 # Family / FamilyChild
@@ -211,14 +212,21 @@ class EventBase(BaseModel):
     family_id: Optional[int] = None
 
 
-class EventCreate(EventBase):
-    pass
+class EventCreate(BaseModel):
+    event_type: EventType
+    date_str: Optional[str] = Field(None, max_length=100)
+    place_id: Optional[int] = None
+    place_name: Optional[str] = Field(None, max_length=255)  # ← новое
+    description: Optional[str] = None
+    individual_id: Optional[int] = None
+    family_id: Optional[int] = None
 
 
 class EventUpdate(BaseModel):
     event_type: Optional[EventType] = None
     date_str: Optional[str] = Field(None, max_length=100)
     place_id: Optional[int] = None
+    place_name: Optional[str] = Field(None, max_length=255)
     description: Optional[str] = None
 
 
@@ -226,7 +234,10 @@ class EventShort(ORMModel):
     id: int
     event_type: EventType
     date_str: Optional[str] = None
-    place_id: Optional[int] = None
+    description: Optional[str] = None
+    individual_id: Optional[int] = None
+    family_id: Optional[int] = None
+    place: Optional["PlaceShort"] = None
 
 
 class PlaceBase(BaseModel):
@@ -366,7 +377,8 @@ class TreeDetail(TreeShort):
     individuals: List[IndividualShort] = []
     families: List[FamilyShort] = []
 
-# Forward refs
 
+# Forward refs
 IndividualDetail.model_rebuild()
 FamilyDetail.model_rebuild()
+EventShort.model_rebuild()
