@@ -12,14 +12,14 @@ import {
 
 export default function TreesPage() {
   const router = useRouter();
-  const { isLoggedIn, isLoading: authLoading, user, logout } = useAuth();
-  const dialog = useDialog();
+  const { isLoggedIn, isLoading: authLoading, user, logout } = useAuth() as any;
+  const dialog: any = useDialog();
   
-  const [trees, setTrees] = useState([]);
+  const [trees, setTrees] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [importing, setImporting] = useState(false);
-  const fileInputRef = useRef(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Защита от неавторизованных
   useEffect(() => {
@@ -85,7 +85,7 @@ export default function TreesPage() {
   // Импорт GEDCOM
   const handleImportClick = () => fileInputRef.current?.click();
 
-  const handleFileChange = async (e) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
@@ -107,7 +107,7 @@ export default function TreesPage() {
       
       const newTree = await res.json();
       router.push(`/tree?tree_id=${newTree.id}`);
-    } catch (err) {
+    } catch (err: any) {
       await dialog.alert({
         title: 'Ошибка импорта',
         description: err.message,
@@ -120,7 +120,7 @@ export default function TreesPage() {
   };
 
   // Удаление дерева
-  const handleDelete = async (treeId, treeName) => {
+  const handleDelete = async (treeId: number, treeName: string) => {
     const ok = await dialog.confirm({
       title: `Удалить дерево «${treeName}»?`,
       description: 'Все персоны, связи и события будут безвозвратно удалены.',
@@ -133,7 +133,7 @@ export default function TreesPage() {
       const res = await apiFetch(`/api/trees/${treeId}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Не удалось удалить');
       await fetchTrees();
-    } catch (err) {
+    } catch (err: any) {
       await dialog.alert({
         title: 'Ошибка',
         description: err.message,

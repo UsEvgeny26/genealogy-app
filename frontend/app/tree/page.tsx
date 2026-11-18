@@ -12,7 +12,7 @@ function TreePageContent() {
   const treeIdStr = searchParams.get('tree_id');
   const treeId = treeIdStr ? Number(treeIdStr) : null;
   
-  const { isLoggedIn, isLoading, user, logout } = useAuth();
+  const { isLoggedIn, isLoading, user, logout } = useAuth() as any;
 
   // Если авторизован, но не передан tree_id — редирект на дашборд
   useEffect(() => {
@@ -73,7 +73,7 @@ function TreePageContent() {
       </header>
 
       {/* Передаем ID напрямую и коллбэк для возврата */}
-      <GenealogyTree treeId={treeId} onBack={() => router.push('/trees')} />
+      <GenealogyTree treeId={treeId} onBack={() => router.push('/')} />
     </main>
   );
 }

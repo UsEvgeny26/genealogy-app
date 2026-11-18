@@ -18,11 +18,11 @@ export default function LoginPage() {
 
   useEffect(() => {
     if (!isLoading && isLoggedIn) {
-      router.replace('/trees');
+      router.replace('/');
     }
   }, [isLoading, isLoggedIn, router]);
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e?.preventDefault();
     setError(null);
     setSubmitting(true);
@@ -32,15 +32,15 @@ export default function LoginPage() {
       } else {
         await register(email.trim(), password, displayName.trim() || undefined);
       }
-      router.replace('/trees');
-    } catch (err) {
+      router.replace('/');
+    } catch (err: any) {
       setError(err.message || 'Не удалось выполнить действие');
     } finally {
       setSubmitting(false);
     }
   };
 
-  const switchMode = (next) => {
+  const switchMode = (next: 'login' | 'register') => {
     setMode(next);
     setError(null);
     if (next === 'register') {

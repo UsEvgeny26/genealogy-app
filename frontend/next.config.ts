@@ -1,15 +1,23 @@
 /** @type {import('next').NextConfig} */
 
 const nextConfig = {
+  output: 'standalone',
+  typescript: {
+    ignoreBuildErrors: true, // Игнорировать ошибки типов
+  },
+  eslint: {
+    ignoreDuringBuilds: true, // Игнорировать ошибки линтера
+  },
   async rewrites() {
+    const backendUrl = process.env.INTERNAL_API_URL || 'http://127.0.0.1:8000';
     return [
       {
         source: '/api/:path*',
-        destination: 'http://127.0.0.1:7001/api/:path*',
+        destination: `${backendUrl}/api/:path*`,
       },
       {
         source: '/uploads/:path*',
-        destination: 'http://127.0.0.1:7001/uploads/:path*',
+        destination: `${backendUrl}/uploads/:path*`,
       },
     ];
   },

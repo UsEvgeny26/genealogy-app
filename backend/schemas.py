@@ -363,7 +363,7 @@ class TreeAssociationEdge(BaseModel):
 class TreeGraphResponse(BaseModel):
     tree_id: int
     tree_name: str
-    owner_id: int
+    owner_id: Optional[int] = None
     can_edit: bool
 
     persons: List[TreeNode]

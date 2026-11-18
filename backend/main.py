@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 import uuid
 from pathlib import Path as FilePath
@@ -414,44 +414,41 @@ def _build_graph(tree: Tree, can_edit: bool, db: Session) -> TreeGraphResponse:
 
 @app.get("/api/graph", response_model=TreeGraphResponse)
 def get_current_graph(
-    tree_id: Optional[int] = None, # <-- ДОБАВЛЕН ПАРАМЕТР
-    user: Optional[User] = Depends(get_current_user),
-    db: Session = Depends(get_db),
+        tree_id: Optional[int] = None,
+        user: Optional[User] = Depends(get_current_user),
+        db: Session = Depends(get_db),
 ):
-    """
-    Универсальный эндпоинт для холста.
-    - Авторизован + передан tree_id → загружаем конкретное дерево.
-    - Авторизован без tree_id → его первое дерево.
-    - Гость → дерево demo-пользователя, can_edit=false.
-    """
-    if user:
-        if tree_id is not None:
-            # get_tree_or_403 сам выдаст 404, если дерева нет, или 403, если оно чужое
-            tree = get_tree_or_403(tree_id, user, db)
+    if tree_id is not None:
+        tree = db.get(Tree, tree_id)
+        if not tree:
+            raise HTTPException(404, detail="Дерево не найдено")
+
+        # Если дерево временное — отдаём его любому желающему, но только для чтения
+        if tree.is_temporary:
+            return _build_graph(tree, can_edit=False, db=db)
+
+        # Если дерево обычное — проверяем владельца
+        if user and tree.owner_id == user.id:
+            return _build_graph(tree, can_edit=True, db=db)
         else:
-            tree = get_or_create_default_tree(user, db)
+            raise HTTPException(403, detail="Нет доступа к этому дереву")
+
+    if user:
+        tree = get_or_create_default_tree(user, db)
         return _build_graph(tree, can_edit=True, db=db)
 
-    # Гость — смотрим дерево demo
+    # Гость без tree_id — смотрит демо-дерево
     demo = db.scalar(select(User).where(User.email == DEMO_EMAIL))
-    if not demo:
-        return TreeGraphResponse(
-            tree_id=0, tree_name="", owner_id=0, can_edit=False,
-            persons=[], families=[],
-            marriage_edges=[], child_edges=[], association_edges=[],
-        )
+    if demo:
+        demo_tree = db.scalar(select(Tree).where(Tree.owner_id == demo.id).order_by(Tree.id))
+        if demo_tree:
+            return _build_graph(demo_tree, can_edit=False, db=db)
 
-    demo_tree = db.scalar(
-        select(Tree).where(Tree.owner_id == demo.id).order_by(Tree.id)
+    return TreeGraphResponse(
+        tree_id=0, tree_name="", owner_id=0, can_edit=False,
+        persons=[], families=[], marriage_edges=[], child_edges=[], association_edges=[],
     )
-    if not demo_tree:
-        return TreeGraphResponse(
-            tree_id=0, tree_name="", owner_id=demo.id, can_edit=False,
-            persons=[], families=[],
-            marriage_edges=[], child_edges=[], association_edges=[],
-        )
 
-    return _build_graph(demo_tree, can_edit=False, db=db)
 
 
 @app.get("/api/trees/{tree_id}/graph", response_model=TreeGraphResponse)
@@ -1247,7 +1244,6 @@ async def import_gedcom_endpoint(
     if len(content) > 20 * 1024 * 1024:
         raise HTTPException(400, detail="Файл слишком большой (макс 20 МБ)")
 
-    # Кладём во временный файл — ged4py хочет path
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -1307,3 +1303,61 @@ def update_tree_timestamp(session, flush_context, instances):
                 .where(Tree.id == tree_id)
                 .values(updated_at=datetime.utcnow())
             )
+
+
+def cleanup_temp_trees(db: Session):
+    """Удаляет гостевые деревья старше 24 часов."""
+    yesterday = datetime.utcnow() - timedelta(hours=24)
+    old_trees = db.scalars(
+        select(Tree).where(Tree.is_temporary == True, Tree.created_at < yesterday)
+    ).all()
+    for t in old_trees:
+        db.delete(t)
+    if old_trees:
+        db.commit()
+
+
+@app.post("/api/guest/import-gedcom", response_model=TreeShort, status_code=201)
+async def guest_import_gedcom(
+        file: UploadFile = File(...),
+        db: Session = Depends(get_db),
+):
+    cleanup_temp_trees(db)
+
+    if not file.filename or not file.filename.lower().endswith((".ged", ".txt")):
+        raise HTTPException(400, detail="Поддерживаются только файлы .ged или .txt")
+
+    content = await file.read()
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(400, detail="Файл слишком большой (макс 20 МБ)")
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".ged", delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        # Создаем ВРЕМЕННОЕ дерево (owner_id=None, is_temporary=True)
+        tree = Tree(
+            name=f"Просмотр: {file.filename}",
+            is_temporary=True,
+            owner_id=None
+        )
+        db.add(tree)
+        db.flush()
+
+        from gedcom_import import import_gedcom as _import_ged
+        try:
+            _import_ged(tmp_path, tree.id, db)
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(400, detail=f"Ошибка импорта: {e}")
+
+        db.commit()
+        db.refresh(tree)
+        return tree
+
+    finally:
+        if tmp_path:
+            FilePath(tmp_path).unlink(missing_ok=True)
+
