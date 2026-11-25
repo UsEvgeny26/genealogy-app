@@ -28,7 +28,88 @@ import { apiFetch } from '@/lib/api';
 
 const DIRECTION_KEY = 'tree-direction';
 
-export const GenealogyTree = ({ treeId, onBack, isEmbedded = false}) => {
+// Функция: выбирает стороны (Top/Bottom/Left/Right) на основе взаимного расположения
+function getHandlePositions(sourceNode, targetNode) {
+  const sX = sourceNode.position.x + (sourceNode.measured?.width || 200) / 2;
+  const sY = sourceNode.position.y + (sourceNode.measured?.height || 90) / 2;
+  const tX = targetNode.position.x + (targetNode.measured?.width || 200) / 2;
+  const tY = targetNode.position.y + (targetNode.measured?.height || 90) / 2;
+
+  const dx = tX - sX;
+  const dy = tY - sY;
+
+  if (Math.abs(dx) > Math.abs(dy)) {
+    return dx > 0 ? { sourceHandle: 'right', targetHandle: 'left' } : { sourceHandle: 'left', targetHandle: 'right' };
+  } else {
+    return dy > 0 ? { sourceHandle: 'bottom', targetHandle: 'top' } : { sourceHandle: 'top', targetHandle: 'bottom' };
+  }
+}
+
+// Функция: обновляет стороны у всех связей
+function recalculateEdges(edges, nodes) {
+  const nodeById = new Map(nodes.map(n => [n.id, n]));
+  
+  return edges.map(edge => {
+    const source = nodeById.get(edge.source);
+    const target = nodeById.get(edge.target);
+    if (!source || !target) return edge;
+    
+    const handles = getHandlePositions(source, target);
+    return {
+      ...edge,
+      sourceHandle: handles.sourceHandle,
+      targetHandle: handles.targetHandle,
+    };
+  });
+}
+
+// Функция BFS для поиска всех родственников до N-го колена
+function getHighlightedIds(centerId, maxDepth, persons, families, childEdges) {
+  if (!centerId) return new Set();
+  
+  // Строим граф связей "человек-человек"
+  const adj = new Map();
+  persons.forEach(p => adj.set(p.id, []));
+  
+  families.forEach(fam => {
+    // Связь супругов
+    if (fam.spouse1_id && fam.spouse2_id) {
+      adj.get(fam.spouse1_id)?.push(fam.spouse2_id);
+      adj.get(fam.spouse2_id)?.push(fam.spouse1_id);
+    }
+    // Связь родитель-ребенок
+    const childrenInFam = childEdges.filter(ce => ce.family_id === fam.id).map(ce => ce.child_id);
+    [fam.spouse1_id, fam.spouse2_id].filter(Boolean).forEach(parentId => {
+      childrenInFam.forEach(childId => {
+        adj.get(parentId)?.push(childId); // родитель -> ребенок
+        adj.get(childId)?.push(parentId); // ребенок -> родитель
+      });
+    });
+  });
+
+  // BFS
+  const highlighted = new Set([centerId]);
+  let queue = [{ id: centerId, depth: 0 }];
+  const visited = new Set([centerId]);
+
+  while (queue.length > 0) {
+    const { id, depth } = queue.shift();
+    if (depth >= maxDepth) continue;
+
+    const neighbors = adj.get(id) || [];
+    for (const neighborId of neighbors) {
+      if (!visited.has(neighborId)) {
+        visited.add(neighborId);
+        highlighted.add(neighborId);
+        queue.push({ id: neighborId, depth: depth + 1 });
+      }
+    }
+  }
+  return highlighted;
+}
+
+export const GenealogyTree = ({ treeId, onBack, isEmbedded = false }) => {
+
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [loading, setLoading] = useState(true);
@@ -38,8 +119,15 @@ export const GenealogyTree = ({ treeId, onBack, isEmbedded = false}) => {
 
   const [layoutDirection, setLayoutDirection] = useState('TB');
   const [menuOpen, setMenuOpen] = useState(false);
+  const [egoState, setEgoState] = useState({
+    active: false,
+    centerId: null,
+    depth: 1,
+  });
 
   const { theme, setTheme: handleThemeChange } = useTheme();
+  // Определяем картинку в зависимости от темы
+  const bgImage = theme === 'dark' ? '/bg-dark.jpg' : '/bg-light.jpg';
 
   const dialog = useDialog();
   const dialogRef = useRef(dialog);
@@ -85,6 +173,11 @@ export const GenealogyTree = ({ treeId, onBack, isEmbedded = false}) => {
   useEffect(() => { edgesRef.current = edges; }, [edges]);
   useEffect(() => { nodesRef.current = nodes; }, [nodes]);
 
+    // Как только узлы меняют позицию (при перетаскивании), обновляем стороны связей
+  useEffect(() => {
+    setEdges((eds) => recalculateEdges(eds, nodes));
+  }, [nodes, setEdges]);
+
   /*  Загрузка  */
 
   const fetchTree = useCallback(async () => {
@@ -116,12 +209,17 @@ export const GenealogyTree = ({ treeId, onBack, isEmbedded = false}) => {
         onAddConnection: (person) => setConnectionSource(person),
       });
 
-      const { nodes: layoutedNodes } = getLayoutedElements(
-        rawNodes,
-        layoutEdges,
-        layoutDirection,
-        []
-      );
+      // Проверяем, есть ли уже сохраненные координаты
+      const hasPositions = rawNodes.some(n => n.position.x !== 0 || n.position.y !== 0);
+
+      let layoutedNodes;
+      if (hasPositions) {
+        // Если координаты есть, используем их, не трогаем Dagre
+        layoutedNodes = rawNodes;
+      } else {
+        // Если это новый импорт (все в 0,0) — раскладываем автоматически
+        layoutedNodes = getLayoutedElements(rawNodes, layoutEdges, layoutDirection, []).nodes;
+      }
 
       positionFamilyNodes(layoutedNodes, families);
       familiesRef.current = families;
@@ -309,6 +407,24 @@ export const GenealogyTree = ({ treeId, onBack, isEmbedded = false}) => {
     [onNodesChange, setNodes]
   );
 
+  const handleNodeDragStop = useCallback(async (event, node) => {
+    // Если это не человек (например, точка семьи) — игнорируем
+    if (node.type !== 'personNode') return;
+
+    try {
+      // Отправляем новые координаты в БД
+      await apiFetch(`/api/individuals/${node.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          pos_x: node.position.x,
+          pos_y: node.position.y,
+        }),
+      });
+    } catch (err) {
+      console.error('Не удалось сохранить позицию', err);
+    }
+  }, []);
+
   /*  Прочее  */
 
   const handleAddRootPerson = () => {
@@ -321,9 +437,134 @@ export const GenealogyTree = ({ treeId, onBack, isEmbedded = false}) => {
     window.location.href = `/tree?tree_id=${newTree.id}`;
   };
 
+    const handleAutoLayout = useCallback(async () => {
+    // 1. Спрашиваем направление
+    const direction = await dialogRef.current.choose({
+      title: 'Автоматическая раскладка',
+      description: 'Выберите направление, в котором будут выстраиваться поколения.',
+      actions: [
+        { value: 'TB', label: 'Сверху вниз', variant: 'default' },
+        { value: 'BT', label: 'Снизу вверх', variant: 'default' },
+        { value: 'LR', label: 'Слева направо', variant: 'default' },
+        { value: 'RL', label: 'Справа налево', variant: 'default' },
+      ],
+      cancelLabel: 'Отмена'
+    });
+
+    if (!direction) return;
+
+    setLoading(true);
+    try {
+      const res = await apiFetch(`/api/graph?tree_id=${treeId}`);
+      const data = await res.json();
+      
+      // достаем families из результата buildRawGraph
+      const { rawNodes, families, layoutEdges } = buildRawGraph(data, {
+        canEdit: graphMeta.can_edit,
+        layoutDirection: direction,
+        onEdit: () => {}, 
+        onDelete: () => {},
+        onAddConnection: () => {},
+      });
+
+      // 2. Считаем новые координаты для людей
+      const { nodes: layoutedNodes } = getLayoutedElements(
+        rawNodes,
+        layoutEdges,
+        direction,
+        []
+      );
+
+      // 3. Расставляем точки семьи на новые места
+      positionFamilyNodes(layoutedNodes, families);
+
+      // 4. Обновляем стейт
+      setNodes(layoutedNodes);
+      
+      // 5. Сохраняем новые координаты только для людей
+      const positionsToSave = layoutedNodes
+        .filter(n => n.type === 'personNode')
+        .map(n => ({
+          id: Number(n.id),
+          pos_x: n.position.x,
+          pos_y: n.position.y,
+        }));
+
+      if (positionsToSave.length > 0) {
+        await apiFetch(`/api/trees/${treeId}/positions`, {
+          method: 'PATCH',
+          body: JSON.stringify({ positions: positionsToSave }),
+        });
+      }
+
+      localStorage.setItem(DIRECTION_KEY, direction);
+
+    } catch (err) {
+      console.error(err);
+      await dialogRef.current.alert({
+        title: 'Ошибка раскладки',
+        description: 'Не удалось автоматически расположить элементы.',
+        variant: 'danger',
+        confirmLabel: 'Понятно',
+      });
+    } finally {
+      setLoading(false);
+    }
+  }, [treeId, graphMeta.can_edit, setNodes]);
+
   const isEmpty = !loading && nodes.length === 0;
   const canEdit = graphMeta.can_edit;
   const showTopLeftAddButton = canEdit && !isEmpty;
+
+    // Вычисляем, кого подсветить, а кого затенить
+  const highlightedIds = useMemo(() => {
+    if (!egoState.active || !egoState.centerId) return null;
+    return getHighlightedIds(
+      egoState.centerId, 
+      egoState.depth, 
+      personsRef.current, 
+      allFamiliesRef.current, 
+      allChildEdgesRef.current
+    );
+  }, [egoState, nodes.length]); // Пересчитываем при изменении узлов или настроек
+
+  // Применяем флаг isDimmed к узлам
+  const displayNodes = useMemo(() => {
+    if (!highlightedIds) return nodes.map(n => ({ ...n, data: { ...n.data, isDimmed: false } }));
+    return nodes.map(n => {
+      // Точки семьи подсвечиваем, если подсвечен хотя бы один супруг
+      let isDimmed = true;
+      if (n.type === 'personNode') {
+        isDimmed = !highlightedIds.has(Number(n.id));
+      } else if (n.type === 'familyNode') {
+        const fam = allFamiliesRef.current.find(f => `family-${f.id}` === n.id);
+        isDimmed = !fam || (!highlightedIds.has(fam.spouse1_id) && !highlightedIds.has(fam.spouse2_id));
+      }
+      return { ...n, data: { ...n.data, isDimmed } };
+    });
+  }, [nodes, highlightedIds]);
+
+  // Применяем флаг isDimmed к рёбрам (ребро тускнеет, если оба конца тусклые)
+  const displayEdges = useMemo(() => {
+    if (!highlightedIds) return edges.map(e => ({ ...e, data: { ...e.data, isDimmed: false } }));
+    return edges.map(e => {
+      const sourceNode = nodes.find(n => n.id === e.source);
+      const targetNode = nodes.find(n => n.id === e.target);
+      
+      // Ребро яркое, если ХОТЯ БЫ ОДИН его конец яркий
+      const isSourceHighlighted = e.source.startsWith('family-') 
+        ? !sourceNode?.data?.isDimmed // для familyNode проверяем data
+        : highlightedIds.has(Number(e.source));
+      const isTargetHighlighted = e.target.startsWith('family-')
+        ? !targetNode?.data?.isDimmed
+        : highlightedIds.has(Number(e.target));
+
+      return {
+        ...e,
+        data: { ...e.data, isDimmed: !(isSourceHighlighted || isTargetHighlighted) }
+      };
+    });
+  }, [edges, nodes, highlightedIds]);
 
   if (loading) {
     return (
@@ -334,7 +575,10 @@ export const GenealogyTree = ({ treeId, onBack, isEmbedded = false}) => {
   }
 
   return (
-    <div className="w-full h-full bg-slate-50 dark:bg-slate-900 relative transition-colors">
+    <div 
+      className="w-full h-full relative transition-colors bg-cover bg-center bg-no-repeat"
+      style={{ backgroundImage: `url(${bgImage})` }}
+    >
       {/* Верхняя панель (скрываем, если встроено в страницу) */}
       {!isEmbedded && (
         <div className="absolute top-4 left-4 z-20 flex items-center gap-3">
@@ -381,10 +625,11 @@ export const GenealogyTree = ({ treeId, onBack, isEmbedded = false}) => {
 
       <ReactFlow
         key={`rf-${layoutDirection}`}
-        nodes={nodes}
-        edges={edges}
+        nodes={displayNodes} // <-- ИЗМЕНИТЬ
+        edges={displayEdges}
         onNodesChange={handleNodesChange}
         onEdgesChange={onEdgesChange}
+        onNodeDragStop={handleNodeDragStop}
         onNodeClick={(_, node) => {
           if (node.type === 'familyNode') return;
           if (canEdit) {
@@ -406,8 +651,7 @@ export const GenealogyTree = ({ treeId, onBack, isEmbedded = false}) => {
         fitView
         proOptions={{ hideAttribution: true }}
       >
-        <Background color="#cbd5e1" gap={16} />
-        <Controls />
+        <Background color={theme === 'dark' ? '#475569' : '#cbd5e1'} gap={16} variant="dots" style={{ opacity: 0.3 }} />
       </ReactFlow>
 
       {isEmpty && (
@@ -496,12 +740,16 @@ export const GenealogyTree = ({ treeId, onBack, isEmbedded = false}) => {
         <SideMenu
           isOpen={menuOpen}
           onClose={() => setMenuOpen(false)}
+          onAutoLayout={handleAutoLayout}
           direction={layoutDirection}
           onDirectionChange={handleDirectionChange}
           theme={theme}
           onThemeChange={handleThemeChange}
           treeId={graphMeta.tree_id}
           onAfterImport={handleAfterImport}
+          egoState={egoState}
+          onEgoStateChange={setEgoState}
+          allPersons={personsRef.current}
         />
       )}
     </div>

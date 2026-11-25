@@ -171,8 +171,8 @@ export function useRelationActions() {
    * Если у кого-то уже есть семья с одним супругом — добавляем второго в неё,
    * иначе создаём новую семью.
    */
-  const connectSpouses = useCallback(
-    async ({ treeId, aId, bId, families = [] }) => {
+    const connectSpouses = useCallback(
+    async ({ treeId, aId, bId, families = [], marriage_date = null }) => {
       const aSingleFamilies = families.filter(
         (f) =>
           (f.spouse1_id === aId && !f.spouse2_id) ||
@@ -190,6 +190,7 @@ export function useRelationActions() {
           spouse1_id: pickSingle.spouse1_id || bId,
           spouse2_id: pickSingle.spouse2_id || bId,
           status: 'married',
+          marriage_date: marriage_date,
         });
       }
 
@@ -197,6 +198,7 @@ export function useRelationActions() {
         spouse1_id: aId,
         spouse2_id: bId,
         status: 'married',
+        marriage_date: marriage_date,
       });
     },
     [createFamily, updateFamily]

@@ -8,6 +8,7 @@ venv/
 *.sqlite3
 .env
 .env.local
+uploads/
 
 # ===== Node / Next.js =====
 node_modules/
@@ -27,6 +28,7 @@ build/
 .env*
 !.env.example
 *.pem
+.env.local
 
 # ===== Logs =====
 npm-debug.log*
@@ -48,3 +50,6 @@ Thumbs.db
 # ===== IDE =====
 .vscode/
 .idea/
+
+# Docker
+postgres_data/

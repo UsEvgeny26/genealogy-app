@@ -30,24 +30,9 @@ body {
   color: var(--text-primary);
 }
 
-
-/* Светлая тема (по умолчанию) */
-.react-flow {
-  background-image: url('/bg-light.jpg') !important;
-  background-size: cover !important;
-  background-position: center !important;
-  background-attachment: fixed !important;
-}
-
-/* Делаем фон полупрозрачным для паттерна ReactFlow (точечки), чтобы картинка была видна */
-.react-flow__background {
-  opacity: 0.3;
-}
-
 /* React Flow — тёмный фон в dark */
 .dark .react-flow {
   background: var(--bg-app);
-  background-image: url('/bg-dark.jpg') !important;
 }
 .dark .react-flow__controls button {
   background: var(--bg-surface);

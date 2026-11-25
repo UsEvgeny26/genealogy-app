@@ -5,6 +5,8 @@ export const RELATION_TYPES = {
   STEP_PARENT: 'step_parent',
   MARRIAGE: 'marriage',
   GODPARENT: 'godparent',
+  FRIEND: 'friend',
+  COLLEAGUE: 'colleague',
 };
 
 export const RELATION_CONFIG = {
@@ -48,6 +50,20 @@ export const RELATION_CONFIG = {
     color: '#f59e0b',
     dashed: true,
     arrow: true,
+    pathType: 'smoothstep',
+  },
+  [RELATION_TYPES.FRIEND]: {
+    label: 'Друг',
+    color: '#10b981', // зеленый
+    dashed: true,
+    arrow: false,
+    pathType: 'smoothstep',
+  },
+  [RELATION_TYPES.COLLEAGUE]: {
+    label: 'Коллега',
+    color: '#8b5cf6', // фиолетовый
+    dashed: true,
+    arrow: false,
     pathType: 'smoothstep',
   },
 };

@@ -4,9 +4,14 @@ import React from 'react';
 import {
   BaseEdge,
   EdgeLabelRenderer,
-  getSmoothStepPath,
+  useNodes,
   getStraightPath,
+  getSmoothStepPath,
 } from '@xyflow/react';
+import {
+  getSmartEdge,
+  svgDrawStraightLinePath,
+} from '@tisoap/react-flow-smart-edge';
 import { X } from 'lucide-react';
 import { RELATION_CONFIG, RELATION_TYPES, DIVORCED_COLOR } from '@/lib/relation-config';
 
@@ -28,17 +33,57 @@ export const RelationEdge = ({
   const isDivorced = kind === RELATION_TYPES.MARRIAGE && data?.divorced;
   const baseColor = isDivorced ? DIVORCED_COLOR : cfg.color;
 
-  const [edgePath, labelX, labelY] =
-    cfg.pathType === 'straight'
-      ? getStraightPath({ sourceX, sourceY, targetX, targetY })
-      : getSmoothStepPath({
-          sourceX,
-          sourceY,
-          sourcePosition,
-          targetX,
-          targetY,
-          targetPosition,
-        });
+  const isDimmed = data?.isDimmed;
+  const opacity = isDimmed ? 0.1 : 1;
+
+  const nodes = useNodes();
+
+  // Разделяем логику: для брака — прямая линия, для остальных — умный обход
+  let edgePath;
+  let labelX;
+  let labelY;
+
+  if (kind === RELATION_TYPES.MARRIAGE) {
+    // Прямая линия для брака, чтобы FamilyNode всегда был на ней
+    [edgePath, labelX, labelY] = getStraightPath({
+      sourceX,
+      sourceY,
+      targetX,
+      targetY,
+    });
+  } else {
+    // Умный обход для родитель-ребёнок и ассоциаций
+    const smartEdge = getSmartEdge({
+      sourcePosition,
+      targetPosition,
+      sourceX,
+      sourceY,
+      targetX,
+      targetY,
+      nodes,
+      options: {
+        nodePadding: 20,
+        gridRatio: 10,
+        drawEdge: svgDrawStraightLinePath, // 🔹 Прямые (ортогональные) линии
+      },
+    });
+
+    if (smartEdge) {
+      edgePath = smartEdge.svgPathString;
+      labelX = smartEdge.edgeCenterX;
+      labelY = smartEdge.edgeCenterY;
+    } else {
+      // Фолбэк, если путь не найден
+      [edgePath, labelX, labelY] = getSmoothStepPath({
+        sourceX,
+        sourceY,
+        sourcePosition,
+        targetX,
+        targetY,
+        targetPosition,
+      });
+    }
+  }
 
   const stroke = selected ? '#1d4ed8' : baseColor;
   const strokeWidth = selected ? 3 : 2;
@@ -59,6 +104,8 @@ export const RelationEdge = ({
           stroke,
           strokeWidth,
           strokeDasharray: cfg.dashed ? '6 4' : undefined,
+          opacity: opacity,
+          transition: 'opacity 0.3s ease',
         }}
       />
 

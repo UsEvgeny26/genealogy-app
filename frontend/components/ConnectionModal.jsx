@@ -14,6 +14,8 @@ const RELATION_OPTIONS_PERSONA = [
   { id: 'adoptive_child',  label: 'Приёмный ребёнок',     hint: 'Я — приёмный ребёнок выбранного',  color: '#a855f7' },
   { id: 'godparent',       label: 'Крёстный',             hint: 'Я — крёстный выбранного',          color: '#f59e0b' },
   { id: 'godchild',        label: 'Крестник/ца',          hint: 'Я — крестник выбранного',          color: '#f59e0b' },
+  { id: 'friend',          label: 'Друг',                hint: 'Я — друг выбранного',          color: '#10b981' },
+  { id: 'colleague',       label: 'Коллега',             hint: 'Я — коллега выбранного',       color: '#8b5cf6' },
 ];
 
 const RELATION_OPTIONS_FAMILY = [
@@ -41,6 +43,7 @@ export const ConnectionModal = ({
   const [search, setSearch] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [marriageDate, setMarriageDate] = useState('');
 
   const actions = useRelationActions();
   const dialog = useDialog();
@@ -93,6 +96,7 @@ export const ConnectionModal = ({
       setSearch('');
       setError(null);
       setBusy(false);
+      setMarriageDate('');
     }
   }, [isOpen, presetSourceId, presetTargetId, presetFamilyId]);
 
@@ -120,13 +124,23 @@ export const ConnectionModal = ({
         const tgtId = Number(finalTargetId);
 
         switch (relationType) {
-          case 'spouse': await actions.connectSpouses({ treeId, aId: srcId, bId: tgtId, families: allFamilies }); break;
+                    case 'spouse':
+            await actions.connectSpouses({
+              treeId,
+              aId: srcId,
+              bId: tgtId,
+              families: allFamilies,
+              marriage_date: marriageDate.trim() || null,
+            });
+            break;
           case 'parent': await actions.connectParentChild({ treeId, parentId: srcId, childId: tgtId, relationshipType: 'biological', families: allFamilies, childEdges: allChildEdges }); break;
           case 'child': await actions.connectParentChild({ treeId, parentId: tgtId, childId: srcId, relationshipType: 'biological', families: allFamilies, childEdges: allChildEdges }); break;
           case 'adoptive_parent': await actions.connectParentChild({ treeId, parentId: srcId, childId: tgtId, relationshipType: 'adoptive', families: allFamilies, childEdges: allChildEdges }); break;
           case 'adoptive_child': await actions.connectParentChild({ treeId, parentId: tgtId, childId: srcId, relationshipType: 'adoptive', families: allFamilies, childEdges: allChildEdges }); break;
           case 'godparent': await actions.createAssociation(treeId, { type: 'godparent', from_id: srcId, to_id: tgtId }); break;
           case 'godchild': await actions.createAssociation(treeId, { type: 'godparent', from_id: tgtId, to_id: srcId }); break;
+          case 'friend': await actions.createAssociation(treeId, { type: 'friend', from_id: srcId, to_id: tgtId }); break;
+          case 'colleague': await actions.createAssociation(treeId, { type: 'colleague', from_id: srcId, to_id: tgtId }); break;
         }
       }
 
@@ -183,10 +197,12 @@ export const ConnectionModal = ({
             </div>
           )}
 
-          <div>
+                    <div>
             <label className="block text-xs font-semibold text-gray-600 dark:text-slate-400 mb-2">
               {isFamilyMode ? 'Тип связи' : 'Кем являюсь я по отношению к другому?'}
             </label>
+            
+            {/* Сетка кнопок */}
             <div className="grid grid-cols-2 gap-2">
               {options.map((opt) => (
                 <button
@@ -206,7 +222,23 @@ export const ConnectionModal = ({
                   </span>
                 </button>
               ))}
-            </div>
+            </div> 
+            
+            {/* Дата свадьбы вынесена ИЗ сетки (grid) */}
+            {!isFamilyMode && relationType === 'spouse' && (
+              <div className="mt-3 animate-in fade-in slide-in-from-top-2">
+                <label className="block text-xs font-semibold text-gray-600 dark:text-slate-400 mb-1">
+                  Дата свадьбы (необязательно)
+                </label>
+                <input
+                  type="text"
+                  placeholder="12 июня 1980"
+                  value={marriageDate}
+                  onChange={(e) => setMarriageDate(e.target.value)}
+                  className="w-full px-3 py-2 border rounded-lg text-sm bg-white dark:bg-slate-900 text-gray-800 dark:text-slate-100 border-gray-200 dark:border-slate-700 focus:ring-2 focus:ring-blue-500 outline-none"
+                />
+              </div>
+            )}
           </div>
 
           {isButtonMode && (

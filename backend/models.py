@@ -12,6 +12,7 @@ from sqlalchemy import (
     UniqueConstraint,
     event,
     func,
+    Float,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -74,11 +75,14 @@ class EventType(str, Enum):
 
 class AssociationType(str, Enum):
     """GEDCOM ASSO — универсальные неродственные связи."""
-    GODPARENT = "godparent"       # крёстный
-    GODCHILD = "godchild"         # крестник (обратная связь)
-    WITNESS = "witness"           # свидетель
-    GUARDIAN = "guardian"         # опекун
-    MENTOR = "mentor"             # наставник
+    GODPARENT = "godparent"  # крёстный
+    GODCHILD = "godchild"  # крестник
+    WITNESS = "witness"  # свидетель
+    GUARDIAN = "guardian"  # опекун
+    MENTOR = "mentor"  # наставник
+    FRIEND = "friend"  # друг
+    COLLEAGUE = "colleague"  # коллега
+    NEIGHBOR = "neighbor"  # сосед
     OTHER = "other"
 
 
@@ -175,6 +179,9 @@ class Individual(Base):
 
     # Мягкое удаление
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+
+    pos_x: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    pos_y: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())

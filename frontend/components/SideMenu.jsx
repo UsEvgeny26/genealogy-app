@@ -3,7 +3,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import {
   X, ArrowDown, ArrowUp, ArrowRight, ArrowLeft, Check,
-  Sun, Moon, Palette, Eye, Rows3, Download, Upload, Loader2,
+  Sun, Moon, Palette, Eye, Rows3, Download, Upload, Loader2, Sparkles 
 } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 
@@ -60,12 +60,16 @@ const THEMES = [
 export const SideMenu = ({
   isOpen,
   onClose,
+  onAutoLayout,
   direction,
   onDirectionChange,
   theme,
   onThemeChange,
   treeId,
   onAfterImport,
+  egoState,         // { active, centerId, depth }
+  onEgoStateChange, // (newState) => void
+  allPersons,       // массив всех людей для выпадающего списка
 }) => {
   const [exporting, setExporting] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -174,18 +178,20 @@ export const SideMenu = ({
         </div>
 
         <div className="flex-1 overflow-y-auto">
-          <Section title="Направление">
-            <div className="space-y-0.5">
-              {DIRECTIONS.map((d) => (
-                <OptionButton
-                  key={d.value}
-                  active={direction === d.value}
-                  icon={d.Icon}
-                  label={d.label}
-                  onClick={() => onDirectionChange(d.value)}
-                />
-              ))}
-            </div>
+           <Section title="Раскладка">
+            <button
+              onClick={() => {
+                onAutoLayout();
+                onClose(); // Закрываем меню после нажатия
+              }}
+              className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800"
+            >
+              <Sparkles className="w-4 h-4 text-purple-500" />
+              <span className="flex-1 text-left">Автоматическая раскладка</span>
+            </button>
+            <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-1">
+              Расположит карточки по выбранному направлению
+            </p>
           </Section>
 
           <Section title="Тема">
@@ -210,6 +216,62 @@ export const SideMenu = ({
                 );
               })}
             </div>
+          </Section>
+
+          <Section title="Фокус на персоне">
+            <label className="flex items-center gap-2 cursor-pointer mb-3">
+              <input
+                type="checkbox"
+                checked={egoState.active}
+                onChange={(e) => onEgoStateChange({ ...egoState, active: e.target.checked })}
+                className="rounded text-blue-600 focus:ring-blue-500"
+              />
+              <span className="text-sm font-medium text-gray-700 dark:text-slate-300">
+                Включить эгоцентричный режим
+              </span>
+            </label>
+
+            {egoState.active && (
+              <div className="space-y-3 pl-6 border-l-2 border-blue-200 dark:border-blue-800">
+                <div>
+                  <label className="block text-xs font-semibold text-gray-600 dark:text-slate-400 mb-1">
+                    Центральная персона
+                  </label>
+                  <select
+                    value={egoState.centerId || ''}
+                    onChange={(e) => onEgoStateChange({ ...egoState, centerId: Number(e.target.value) })}
+                    className="w-full text-xs px-2 py-1.5 border border-gray-200 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-900"
+                  >
+                    <option value="">— Выберите —</option>
+                    {allPersons.map(p => (
+                      <option key={p.id} value={p.id}>
+                        {p.first_name} {p.last_name || ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-gray-600 dark:text-slate-400 mb-1">
+                    Кого подсветить?
+                  </label>
+                  <div className="space-y-1 text-xs text-gray-700 dark:text-slate-300">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="checkbox" checked={egoState.depth >= 1} onChange={() => onEgoStateChange({ ...egoState, depth: 1 })} />
+                      1-й круг (Супруги, родители, дети)
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="checkbox" checked={egoState.depth >= 2} onChange={() => onEgoStateChange({ ...egoState, depth: 2 })} />
+                      2-й круг (Бабушки/дедушки, внуки, братья/сёстры)
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="checkbox" checked={egoState.depth >= 3} onChange={() => onEgoStateChange({ ...egoState, depth: 3 })} />
+                      3-й круг (Дяди/тёти, племянники, двоюродные)
+                    </label>
+                  </div>
+                </div>
+              </div>
+            )}
           </Section>
 
           <Section title="Экспорт">

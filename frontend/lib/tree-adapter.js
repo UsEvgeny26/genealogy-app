@@ -39,7 +39,10 @@ export function buildRawGraph(apiData, {
       onDelete: () => onDelete(p.id),
       onAddConnection: () => onAddConnection(p),
     },
-    position: { x: 0, y: 0 },
+    position: { 
+      x: p.pos_x != null ? p.pos_x : 0, 
+      y: p.pos_y != null ? p.pos_y : 0 
+    },
   }));
 
   const familyNodes = families.map((f) => {
@@ -126,8 +129,8 @@ export function buildRenderEdges(apiData, layoutedNodes, {
         id: `m-${me.family_id}`,
         source: String(sourceId),
         target: String(targetId),
-        sourceHandle: 'perp-source',
-        targetHandle: 'perp-target',
+        sourceHandle: 'right',
+        targetHandle: 'left',
         type: 'relationEdge',
         animated: true,
         data: {
@@ -149,8 +152,8 @@ export function buildRenderEdges(apiData, layoutedNodes, {
       id: `fc-${ce.family_id}-${ce.child_id}`,
       source: `family-${ce.family_id}`,
       target: String(ce.child_id),
-      sourceHandle: 'flow-source',
-      targetHandle: 'flow-target',
+      sourceHandle: 'bottom',
+      targetHandle: 'top',
       type: 'relationEdge',
       animated: true,
       markerEnd: cfg.arrow
@@ -170,20 +173,24 @@ export function buildRenderEdges(apiData, layoutedNodes, {
 
   // --- association edges (крёстные) ---
   const associationEdges = (apiData.association_edges || []).map((ae) => {
-    const cfg = RELATION_CONFIG[RELATION_TYPES.GODPARENT];
+    const relType = ae.type === 'friend' ? RELATION_TYPES.FRIEND 
+                : ae.type === 'colleague' ? RELATION_TYPES.COLLEAGUE 
+                : RELATION_TYPES.GODPARENT;
+  
+    const cfg = RELATION_CONFIG[relType];
     return {
       id: `a-${ae.id}`,
       source: String(ae.source_id),
       target: String(ae.target_id),
-      sourceHandle: 'flow-source',
-      targetHandle: 'flow-target',
+      sourceHandle: 'bottom',
+      targetHandle: 'left',
       type: 'relationEdge',
       animated: true,
       markerEnd: cfg.arrow
         ? { type: MarkerType.ArrowClosed, color: cfg.color }
         : undefined,
       data: {
-        kind: RELATION_TYPES.GODPARENT,
+        kind: relType,
         associationId: ae.id,
         associationType: ae.type,
         canDelete: canEdit,

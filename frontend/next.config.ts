@@ -2,11 +2,8 @@
 
 const nextConfig = {
   output: 'standalone',
-  typescript: {
-    ignoreBuildErrors: true, // Игнорировать ошибки типов
-  },
-  eslint: {
-    ignoreDuringBuilds: true, // Игнорировать ошибки линтера
+  typescript: { 
+    ignoreBuildErrors: true 
   },
   async rewrites() {
     const backendUrl = process.env.INTERNAL_API_URL || 'http://127.0.0.1:8000';

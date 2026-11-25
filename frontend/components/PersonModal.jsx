@@ -416,6 +416,7 @@ export const PersonModal = ({
                 value={formData.photo_url}
                 onChange={(url) => setFormData((f) => ({ ...f, photo_url: url }))}
                 disabled={loadingPerson}
+                treeId={treeId}
               />
 
               <div className="pt-2">

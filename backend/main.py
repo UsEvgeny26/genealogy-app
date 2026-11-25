@@ -7,7 +7,7 @@ import tempfile
 from fastapi import Depends, FastAPI, HTTPException, Response, status, File, UploadFile, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, select, event
+from sqlalchemy import func, select, event, or_
 from sqlalchemy.orm import Session, joinedload
 from fastapi.responses import PlainTextResponse
 from urllib.parse import quote
@@ -42,7 +42,7 @@ from schemas import (
     TreeCreate, TreeListItem, TreeNode, TreeShort,
     TreeStats, TreeUpdate, TreeGraphResponse, TreeFamilyNode,
     TreeMarriageEdge, TreeChildEdge, TreeAssociationEdge,
-    UserCreate, UserPublic, TreeOrphanParentEdge,
+    UserCreate, UserPublic, TreeOrphanParentEdge, PositionBulkUpdate,
 )
 
 
@@ -76,8 +76,9 @@ MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
 
 @app.post("/api/upload")
 async def upload_image(
-    file: UploadFile = File(...),
-    user: User = Depends(require_user),
+        file: UploadFile = File(...),
+        tree_id: Optional[int] = Form(None),
+        user: User = Depends(require_user),
 ):
     if not file.content_type or file.content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(400, detail="Допустимы только JPG, PNG, WebP, GIF")
@@ -89,7 +90,11 @@ async def upload_image(
         raise HTTPException(400, detail="Пустой файл")
 
     ext = ALLOWED_IMAGE_TYPES[file.content_type]
-    filename = f"{uuid.uuid4().hex}{ext}"
+    # Формируем уникальное имя: tree_1_user_2_a1b2c3d4.jpg
+    unique_hash = uuid.uuid4().hex
+    tree_part = f"tree_{tree_id}_" if tree_id else ""
+    filename = f"{tree_part}user_{user.id}_{unique_hash}{ext}"
+
     target = UPLOADS_DIR / filename
 
     with open(target, "wb") as f:
@@ -344,6 +349,9 @@ def _build_graph(tree: Tree, can_edit: bool, db: Session) -> TreeGraphResponse:
             is_alive=i.is_alive,
             photo_url=i.photo_url,
             birth_date=i.birth_date,
+            death_date=i.death_date,
+            pos_x=i.pos_x,
+            pos_y=i.pos_y,
         )
         for i in individuals
     ]
@@ -548,9 +556,18 @@ def _individual_to_detail(ind: Individual, db: Session) -> IndividualDetail:
             _family_short_with_children(fam, children, live_person_ids)
         )
 
-    events = db.scalars(
-        select(Event).where(Event.individual_id == ind.id).order_by(Event.id)
-    ).all()
+        # События: собственные + семейные (брак/развод)
+        spouse_family_ids = [f.id for f in spouse_families_raw]
+
+        conditions = [Event.individual_id == ind.id]
+        if spouse_family_ids:
+            conditions.append(Event.family_id.in_(spouse_family_ids))
+
+        events = db.scalars(
+            select(Event)
+            .where(or_(*conditions))
+            .order_by(Event.id)
+        ).all()
 
     return IndividualDetail(
         id=ind.id,
@@ -963,6 +980,27 @@ def list_places(
     ).all()
     return [PlaceShort.model_validate(p) for p in places]
 
+def _sync_family_events(fam: Family, db: Session) -> None:
+    """Автоматически создает/обновляет события брака и развода."""
+    # Синхронизация брака (MARR)
+    marr = db.scalar(select(Event).where(Event.family_id == fam.id, Event.event_type == EventType.MARRIAGE))
+    if fam.marriage_date:
+        if marr:
+            marr.date_str = fam.marriage_date
+        else:
+            db.add(Event(tree_id=fam.tree_id, family_id=fam.id, event_type=EventType.MARRIAGE, date_str=fam.marriage_date))
+    elif marr:
+        db.delete(marr)
+
+    # Синхронизация развода (DIV)
+    div = db.scalar(select(Event).where(Event.family_id == fam.id, Event.event_type == EventType.DIVORCE))
+    if fam.divorce_date:
+        if div:
+            div.date_str = fam.divorce_date
+        else:
+            db.add(Event(tree_id=fam.tree_id, family_id=fam.id, event_type=EventType.DIVORCE, date_str=fam.divorce_date))
+    elif div:
+        db.delete(div)
 
 @app.post("/api/trees/{tree_id}/families", response_model=FamilyDetail, status_code=201)
 def create_family(
@@ -979,12 +1017,27 @@ def create_family(
         _validate_individual_in_tree(data.spouse1_id, tree.id, db)
         _validate_individual_in_tree(data.spouse2_id, tree.id, db)
 
-        # Проверка дубля: активная семья между этими двумя уже есть?
+        # У человека может быть только 1 действующий супруг
+        for spouse_id in (data.spouse1_id, data.spouse2_id):
+            active_marriage = db.scalar(
+                select(Family).where(
+                    Family.tree_id == tree.id,
+                    Family.deleted_at.is_(None),
+                    Family.status.in_([FamilyStatus.MARRIED, FamilyStatus.PARTNERS]),
+                    (Family.spouse1_id == spouse_id) | (Family.spouse2_id == spouse_id)
+                )
+            )
+            if active_marriage:
+                raise HTTPException(
+                    status_code=400,
+                    detail="У этого человека уже есть действующий супруг(а). Сначала оформите развод."
+                )
+
+        # Проверка дубля (как было)
         existing = db.scalar(
             select(Family).where(
                 Family.tree_id == tree.id,
                 Family.deleted_at.is_(None),
-                Family.status != FamilyStatus.DIVORCED,
                 (
                     ((Family.spouse1_id == data.spouse1_id) & (Family.spouse2_id == data.spouse2_id))
                     | ((Family.spouse1_id == data.spouse2_id) & (Family.spouse2_id == data.spouse1_id))
@@ -992,13 +1045,15 @@ def create_family(
             )
         )
         if existing:
-            raise HTTPException(
-                status_code=400,
-                detail="Семья между этими людьми уже существует",
-            )
+            raise HTTPException(status_code=400, detail="Семья между этими людьми уже существует")
 
     fam = Family(tree_id=tree.id, **data.model_dump())
     db.add(fam)
+    db.flush() # Нужно, чтобы получить fam.id
+
+    # АВТОСОЗДАНИЕ СОБЫТИЙ
+    _sync_family_events(fam, db)
+
     db.commit()
     db.refresh(fam)
     return _family_to_detail(fam, db)
@@ -1038,6 +1093,7 @@ def update_family(
     for k, v in payload.items():
         setattr(fam, k, v)
 
+    _sync_family_events(fam, db)
     db.commit()
     db.refresh(fam)
     return _family_to_detail(fam, db)
@@ -1360,4 +1416,24 @@ async def guest_import_gedcom(
     finally:
         if tmp_path:
             FilePath(tmp_path).unlink(missing_ok=True)
+
+
+@app.patch("/api/trees/{tree_id}/positions")
+def bulk_update_positions(
+        tree_id: int,
+        data: PositionBulkUpdate,
+        user: User = Depends(require_user),
+        db: Session = Depends(get_db),
+):
+    tree = get_tree_or_403(tree_id, user, db)
+
+    # Обновляем координаты пакетно
+    for item in data.positions:
+        ind = db.get(Individual, item.id)
+        if ind and ind.tree_id == tree.id:
+            ind.pos_x = item.pos_x
+            ind.pos_y = item.pos_y
+
+    db.commit()
+    return {"status": "ok", "updated": len(data.positions)}
 

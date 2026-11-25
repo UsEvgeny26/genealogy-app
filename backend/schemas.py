@@ -93,6 +93,8 @@ class IndividualBase(BaseModel):
     birth_place: Optional[str] = Field(None, max_length=255)
     death_date: Optional[str] = Field(None, max_length=100)
     death_place: Optional[str] = Field(None, max_length=255)
+    pos_x: Optional[float] = None
+    pos_y: Optional[float] = None
 
 
 class IndividualCreate(IndividualBase):
@@ -115,6 +117,8 @@ class IndividualUpdate(BaseModel):
     birth_place: Optional[str] = Field(None, max_length=255)
     death_date: Optional[str] = Field(None, max_length=100)
     death_place: Optional[str] = Field(None, max_length=255)
+    pos_x: Optional[float] = None
+    pos_y: Optional[float] = None
 
 
 class IndividualShort(ORMModel):
@@ -328,6 +332,9 @@ class TreeNode(ORMModel):
     is_alive: bool
     photo_url: Optional[str] = None
     birth_date: Optional[str] = None
+    death_date: Optional[str] = None
+    pos_x: Optional[float] = None
+    pos_y: Optional[float] = None
 
 
 class TreeFamilyNode(ORMModel):
@@ -359,6 +366,13 @@ class TreeAssociationEdge(BaseModel):
     source_id: int
     target_id: int
 
+class PositionUpdate(BaseModel):
+    id: int
+    pos_x: float
+    pos_y: float
+
+class PositionBulkUpdate(BaseModel):
+    positions: List[PositionUpdate]
 
 class TreeGraphResponse(BaseModel):
     tree_id: int

@@ -4,7 +4,7 @@ import React, { useRef, useState } from 'react';
 import { Upload, X, Loader2, User } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 
-export function PhotoUpload({ value, onChange, disabled }) {
+export function PhotoUpload({ value, onChange, disabled, treeId }) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState(null);
   const inputRef = useRef(null);
@@ -21,6 +21,8 @@ export function PhotoUpload({ value, onChange, disabled }) {
     try {
       const fd = new FormData();
       fd.append('file', file);
+      if (treeId) fd.append('tree_id', treeId); 
+      
       const res = await apiFetch('/api/upload', { method: 'POST', body: fd });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
