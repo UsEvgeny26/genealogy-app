@@ -2,8 +2,8 @@
 
 import React, { useEffect, useState, useRef } from 'react';
 import {
-  X, ArrowDown, ArrowUp, ArrowRight, ArrowLeft, Check,
-  Sun, Moon, Palette, Eye, Rows3, Download, Upload, Loader2, Sparkles 
+  X, Check, Sun, Moon, Palette, Eye, Rows3, 
+  Download, Upload, Loader2, Sparkles 
 } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 
@@ -45,13 +45,6 @@ function OptionButton({ active, icon: Icon, label, onClick, disabled }) {
   );
 }
 
-const DIRECTIONS = [
-  { value: 'TB', label: 'Сверху вниз',   Icon: ArrowDown },
-  { value: 'BT', label: 'Снизу вверх',   Icon: ArrowUp },
-  { value: 'LR', label: 'Слева направо', Icon: ArrowRight },
-  { value: 'RL', label: 'Справа налево', Icon: ArrowLeft },
-];
-
 const THEMES = [
   { value: 'light', label: 'Светлая', Icon: Sun },
   { value: 'dark',  label: 'Тёмная',  Icon: Moon },
@@ -61,15 +54,13 @@ export const SideMenu = ({
   isOpen,
   onClose,
   onAutoLayout,
-  direction,
-  onDirectionChange,
   theme,
   onThemeChange,
   treeId,
   onAfterImport,
-  egoState,         // { active, centerId, depth }
-  onEgoStateChange, // (newState) => void
-  allPersons,       // массив всех людей для выпадающего списка
+  egoState,
+  onEgoStateChange,
+  allPersons,
 }) => {
   const [exporting, setExporting] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -122,10 +113,7 @@ export const SideMenu = ({
     e.target.value = '';
     if (!file) return;
 
-    if (!confirm(
-      `Импортировать «${file.name}» в новое дерево?\n\n` +
-      `Текущее дерево не изменится — создастся новое.`
-    )) return;
+    if (!confirm(`Импортировать «${file.name}» в новое дерево?\n\nТекущее дерево не изменится — создастся новое.`)) return;
 
     setImporting(true);
     try {
@@ -150,7 +138,6 @@ export const SideMenu = ({
 
   return (
     <>
-      {/* Overlay */}
       <div
         onClick={onClose}
         className={`fixed inset-0 z-30 bg-black/30 backdrop-blur-[1px] transition-opacity duration-200 ${
@@ -158,7 +145,6 @@ export const SideMenu = ({
         }`}
       />
 
-      {/* Drawer */}
       <aside
         className={`fixed top-0 left-0 h-full w-80 bg-white dark:bg-slate-900 shadow-2xl z-40 flex flex-col transition-transform duration-300 ease-out ${
           isOpen ? 'translate-x-0' : '-translate-x-full'
@@ -178,11 +164,11 @@ export const SideMenu = ({
         </div>
 
         <div className="flex-1 overflow-y-auto">
-           <Section title="Раскладка">
+          <Section title="Раскладка">
             <button
               onClick={() => {
                 onAutoLayout();
-                onClose(); // Закрываем меню после нажатия
+                onClose();
               }}
               className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800"
             >

@@ -8,7 +8,7 @@ from fastapi import Depends, FastAPI, HTTPException, Response, status, File, Upl
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select, event, or_
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session
 from fastapi.responses import PlainTextResponse
 from urllib.parse import quote
 
@@ -556,18 +556,18 @@ def _individual_to_detail(ind: Individual, db: Session) -> IndividualDetail:
             _family_short_with_children(fam, children, live_person_ids)
         )
 
-        # События: собственные + семейные (брак/развод)
-        spouse_family_ids = [f.id for f in spouse_families_raw]
+    # События: собственные + семейные (брак/развод)
+    spouse_family_ids = [f.id for f in spouse_families_raw]
 
-        conditions = [Event.individual_id == ind.id]
-        if spouse_family_ids:
-            conditions.append(Event.family_id.in_(spouse_family_ids))
+    conditions = [Event.individual_id == ind.id]
+    if spouse_family_ids:
+        conditions.append(Event.family_id.in_(spouse_family_ids))
 
-        events = db.scalars(
-            select(Event)
-            .where(or_(*conditions))
-            .order_by(Event.id)
-        ).all()
+    events = db.scalars(
+        select(Event)
+        .where(or_(*conditions))
+        .order_by(Event.id)
+    ).all()
 
     return IndividualDetail(
         id=ind.id,
